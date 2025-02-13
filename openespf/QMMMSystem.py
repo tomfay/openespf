@@ -2,8 +2,8 @@
 The QMMMSystem object handles all energy+force evaluations for the full QM/MM system.
 '''
 
-from MMSystem import MMSystem
-from QMSystem import QMSystem
+from .MMSystem import MMSystem
+from .QMSystem import QMSystem
 from pyscf import gto
 from scipy.optimize import fsolve
 import numpy as np

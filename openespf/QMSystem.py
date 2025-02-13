@@ -1,7 +1,7 @@
 from pyscf import gto, scf, dft, tddft, ao2mo, lib
 import numpy as np
 from scipy.linalg import sqrtm, inv, solve
-from QMMultipole import QMMultipole
+from .QMMultipole import QMMultipole
 from copy import deepcopy, copy
 
 
