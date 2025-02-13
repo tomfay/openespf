@@ -197,12 +197,12 @@ class MMSystem:
         Gets the reference energy for the MM electrostatic system without 
         '''
         self.resetMultipoleForce()
-        return self.getMultipoleEnergyForces(as_numpy=as_numpy)
+        return self.getMultipoleEnergyForces(as_numpy=as_numpy):
     
     def getMultipoleEnergy(self,get_forces=False):
         return self.multipole_simulation.context.getState(getEnergy=True).getPotentialEnergy()
     
-    def getMultipoleEnergyForces(self,as_numpy=True)
+    def getMultipoleEnergyForces(self,as_numpy=True):
         state = self.multipole_simulation.context.getState(getEnergy=True,getForces=True)
         return state.getPotentialEnergy()._value, state.getForces(asNumpy=as_numpy)._value
     
