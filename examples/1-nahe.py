@@ -6,7 +6,7 @@ from openmm.app import *
 from openmm import *
 from openmm.unit import *
 import numpy as np
-from QMMMSystem import QMMMSystem
+from openespf import QMMMSystem
 import matplotlib.pyplot as plt
 
 

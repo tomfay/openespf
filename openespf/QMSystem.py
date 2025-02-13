@@ -1,7 +1,7 @@
 from pyscf import gto, scf, dft, tddft, ao2mo, lib
 import numpy as np
 from scipy.linalg import sqrtm, inv, solve
-from .QMMultipole import QMMultipole
+from QMMultipole import QMMultipole
 from copy import deepcopy, copy
 
 
@@ -93,9 +93,9 @@ class QMSystem:
         # set up the correction to the one electron Hamiltonian from embedding
         if self.int_method == "drf":
             # first the u_0 term
-            h_int = (u_0/self.mf.mol.nelectron) * self.S
+            #h_int = (u_0/self.mf.mol.nelectron) * self.S
             # the induction term
-            h_int = h_int + np.einsum('a,anm->nm',u_1,self.Q)
+            h_int = np.einsum('a,anm->nm',u_1,self.Q)
             # finally get the self-energy term
             self.Q_Sinv = np.einsum('ank,km->anm',self.Q,self.S_inv)
             self.u2_Q = np.einsum('ab,bnm->anm',u_2,self.Q)
