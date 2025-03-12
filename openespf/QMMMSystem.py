@@ -38,7 +38,7 @@ class QMMMSystem:
         self.mm_system.setQMPositions(self.qm_positions)
         
         # printing
-        self.print_info = True
+        self.print_info = False
         
         return
     
@@ -103,7 +103,11 @@ class QMMMSystem:
         # get the QM + interaction energy 
         # TODO - modify to deal with multiple energies from excited states possibly return a list of dictionaries, one for each state
         start = timer()
-        energy_terms = { **energy_terms, **self.qm_system.getEnergy(return_terms=True)}
+        qm_energy_terms = self.qm_system.getEnergy(return_terms=True)
+        if type(qm_energy_terms) is type([]):
+            energy_terms = [{ **energy_terms, **state_energy_terms} for state_energy_terms in qm_energy_terms]
+        else:
+            energy_terms = { **energy_terms, **qm_energy_terms}
         end = timer()
         if self.print_info : print("QM energy time:",end-start,"s")
         
@@ -111,8 +115,80 @@ class QMMMSystem:
         if return_terms:
             return energy_terms
         else: 
-            return np.sum(np.array([energy_terms[k] for k in list(energy_terms.keys())]))
+            if type(energy_terms) is not type([]):
+                return np.sum(np.array([energy_terms[k] for k in list(energy_terms.keys())]))
+            else:
+                return np.array([np.sum(np.array([state_energy_terms[k] for k in list(state_energy_terms.keys())])) for state_energy_terms in energy_terms])
+    
+    def getEnergyForces(self,return_terms=False):
+        '''
         
+        '''
+        
+        
+        # get the MM system energy terms
+        if self.int_method in ["drf","mf"] :
+            # get a dictionary of polarization energy resps
+            start = timer()
+            pol_resp = self.mm_system.getPolarizationEnergyForceResp(self.qm_positions,self.multipole_order,position_units="Bohr")
+            end = timer()
+            if self.print_info : print("Pol resp time:",end-start,"s")
+            start = end
+            # set the polarization response 
+            self.qm_system.setPolarizationEnergyResp(pol_resp)
+        
+        if self.rep_method == "exch":
+            # set up the repulsion
+            self.qm_system.setExchRepParameters(self.rep_info,self.mm_positions)
+        
+        # set up a dictionary for decomposition of the energy terms
+        energy_terms = {} 
+        force_terms_mm = {}
+        force_terms_qm = {}
+        # get the MM energy
+        energy_terms["mm electrostatics"] = pol_resp["U_0"]
+        force_terms_mm["mm electrostatics"] = pol_resp["F_0_mm"]
+        force_terms_qm["mm electrostatics"] = pol_resp["F_0_qm"]
+        start = timer()
+        E_mm,F_mm = self.mm_system.getEnergyForces(terms="remainder")
+        energy_terms["mm remainder"] = E_mm
+        force_terms_mm["mm remainder"] = F_mm
+        end = timer()
+        if self.print_info : print("MM energy time:",end-start,"s")
+        # get the QM + interaction energy 
+        # TODO - modify to deal with multiple energies from excited states possibly return a list of dictionaries, one for each state
+        start = timer()
+        qm_energy_terms = self.qm_system.getEnergy(return_terms=True)
+        
+        if type(qm_energy_terms) is type([]):
+            energy_terms = [{ **energy_terms, **state_energy_terms} for state_energy_terms in qm_energy_terms]
+        else:
+            energy_terms = { **energy_terms, **qm_energy_terms}
+        
+        force_terms_mm["QM+int"] = self.qm_system.getForcesMM()
+        
+        F_qm = self.qm_system.getForces(return_terms=True)
+        #print(F_qm)
+        if type(F_qm) is type([]):
+            force_terms_qm = [{ **force_terms_qm, **F_n_qm} for F_n_qm in F_qm]
+        else:
+            force_terms_qm = { **force_terms_qm, **F_qm}
+        end = timer()
+        
+        
+        
+        if self.print_info : print("QM energy/force time:",end-start,"s")
+        
+        # return the energy
+        if return_terms:
+            return energy_terms, force_terms_qm, force_terms_mm
+        else: 
+            f_tot_qm = np.sum([force_terms_qm[k] for k in list(force_terms_qm.keys())],axis=0)
+            f_tot_mm = np.sum([force_terms_mm[k] for k in list(force_terms_mm.keys())],axis=0)
+            if type(energy_terms) is not type([]):
+                return np.sum(np.array([energy_terms[k] for k in list(energy_terms.keys())])), f_tot_qm, f_tot_mm
+            
+    
     def setupExchRep(self,atom_type_info,mm_types,cutoff=12.0,setup_info=None):
         '''
         Sets up Exchange repsulion parameters for each MM atom
@@ -182,7 +258,21 @@ class QMMMSystem:
         return {"N_eff":1.0*N_eff,"basis":basis,"orbital type":orb_type}
         
             
-        
+    def testEnergyFixedMultipoles(self,q):
+        pol_resp = self.mm_system.getPolarizationEnergyForceResp(self.qm_positions,self.multipole_order,position_units="Bohr")
+        U_0 = pol_resp["U_0"]
+        U_1 = pol_resp["U_1"]
+        U_2 = pol_resp["U_2"]
+        E = U_0 + np.einsum('a,a',U_1,q) + 0.5 * np.einsum('a,ab,b',q,U_2,q)
+        F_0_mm = pol_resp["F_0_mm"]
+        F_1_mm = pol_resp["F_1_mm"]
+        F_2_mm = pol_resp["F_2_mm"]
+        F_mm = F_0_mm + np.einsum('kxa,a->kx',F_1_mm,q) + 0.5 * np.einsum('a,kxab,b->kx',q,F_2_mm,q)
+        F_0_qm = pol_resp["F_0_qm"]
+        F_1_qm = pol_resp["F_1_qm"]
+        F_2_qm = pol_resp["F_2_qm"]
+        F_qm = F_0_qm + np.einsum('kxa,a->kx',F_1_qm,q) + 0.5 * np.einsum('a,kxab,b->kx',q,F_2_qm,q)
+        return E,F_qm,F_mm
         
         
 

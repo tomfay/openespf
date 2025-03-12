@@ -1,7 +1,8 @@
 from .QMMMSystem import QMMMSystem
 from .QMSystem import QMSystem
 from .MMSystem import MMSystem
-from .QMMultipole import QMMultipole
+from .Data import *
+#from .QMMultipole import QMMultipole
 
 # Package metadata
 __version__ = "0.1.0"

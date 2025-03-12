@@ -284,15 +284,15 @@ def getIPESPMat(mol,grid_coords,block_size=16):
     for i in range(0,N_block):
         start = i*block_size
         end = min(start+block_size,N_grid)
-        ipesp[:,start:end,:,:] = -mol.intor('int1e_grids_ip',grids=grid_coords[start:end,:])
+        ipesp[:,start:end,:,:] = -mol.intor('cint1e_grids_ip_sph',grids=grid_coords[start:end,:])
     return ipesp
 
-def getESPFMultipoleOperators(mol,grid_coords,weights,l_max=0,block_size=16,add_correction=True,return_fit_vars=False):
+def getESPFMultipoleOperators(mol,grid_coords,weights,l_max=0,block_size=16,add_correction=True,return_fit_vars=False,S=None,r_int=None):
     '''
     gets ESPF charge operators.
     '''
     # get coordinates of 
-    R = mol.atom_coords()
+    R = mol.atom_coords(unit="Bohr")
     
     # general info
     N_grid = grid_coords.shape[0]
@@ -314,17 +314,24 @@ def getESPFMultipoleOperators(mol,grid_coords,weights,l_max=0,block_size=16,add_
     w_D = w.reshape((N_grid,1)) * D
     A_fit = (D.T).dot( w_D )
     A_fit_inv = inv(A_fit)
-    b_fit = np.einsum('ka,knm->anm',w_D,esp)
+    b_fit = np.einsum('ka,knm->anm',w_D,esp,optimize=True)
+    #D_esp = np.einsum('ka,knm',D,esp)
     
     # get the uncorrect Q operators
     Q = np.einsum('ab,bnm->anm',A_fit_inv,b_fit)
     
     # add correction 
     if add_correction:
-        Q_tot = -mol.intor('int1e_ovlp')
+        if S is None:
+            Q_tot = -mol.intor('int1e_ovlp')
+        else:
+            Q_tot = -S
         Q[0:N,:,:] = Q[0:N,:,:] + (1./N)*(Q_tot - np.einsum('Anm->nm',Q[0:N,:,:]))
         if l_max>0:
-            mu_tot = -mol.intor('int1e_r')
+            if r_int is None:
+                mu_tot = -mol.intor('int1e_r')
+            else:
+                mu_tot = -r_int
             for alpha in range(0,3):
                 start = (alpha+1)*N
                 end = start + N
@@ -499,9 +506,9 @@ def getESPFMultipoleOperatorAtmDeriv(mol,J,grid_coords,fit_vars,gradJ_w,grad_D,i
     # the derivative consists of two parts:
     # grad_J (A^-1 b) = (grad_J A^-1 ) b + A^-1 (grad_J b)
     # first the (grad_J A^-1) b part
-    gradJ_A_fit_inv = np.einsum('xab,bc->xac',gradJ_A_fit,-A_fit_inv)
-    gradJ_A_fit_inv = np.einsum('ab,xbc->xac',A_fit_inv,gradJ_A_fit_inv)
-    gradJ_Q += np.einsum('xab,bnm->xanm',gradJ_A_fit_inv,b_fit)
+    gradJ_A_fit_inv = np.einsum('xab,bc->xac',gradJ_A_fit,-A_fit_inv,optimize=True)
+    gradJ_A_fit_inv = np.einsum('ab,xbc->xac',A_fit_inv,gradJ_A_fit_inv,optimize=True)
+    gradJ_Q += np.einsum('xab,bnm->xanm',gradJ_A_fit_inv,b_fit,optimize=True)
     
     # get gradJ_esp
     gradJ_esp = getGradESPGrid(J,mol,ipesp,grid_atms)
@@ -510,7 +517,7 @@ def getESPFMultipoleOperatorAtmDeriv(mol,J,grid_coords,fit_vars,gradJ_w,grad_D,i
     gradJ_b_fit = getGradbfitESP(esp,w,D,gradJ_D,gradJ_w,gradJ_esp)
     
     # second the A^-1 (grad_J b) part
-    gradJ_Q += np.einsum('ab,xbnm->xanm',A_fit_inv,gradJ_b_fit)
+    gradJ_Q += np.einsum('ab,xbnm->xanm',A_fit_inv,gradJ_b_fit,optimize=True)
     
     if add_correction:
         gradJ_Q_tot = getGradQtot(mol,J)
@@ -529,13 +536,17 @@ def getESPFMultipoleOperatorAtmDeriv(mol,J,grid_coords,fit_vars,gradJ_w,grad_D,i
     return gradJ_Q
 
 def getGradbfitESP(esp,w,D,gradJ_D,gradJ_w,gradJ_esp):
-    N_grid = len(w)
-    N_Q = D.shape[1]
-    w_D = w.reshape((N_grid,1)) * D
-    #gradJ_w_D = gradJ_w.reshape((3,N_grid,1)) * D.reshape((1,N_grid,N_Q))
-    #w_gradJ_D = w.reshape((1,N_grid,1)) * gradJ_D
-    gradJ_wD = gradJ_w.reshape((3,N_grid,1)) * D.reshape((1,N_grid,N_Q)) + w.reshape((1,N_grid,1)) * gradJ_D
-    gradJ_b_fit = np.einsum('ka,xknm->xanm',w_D,gradJ_esp) + np.einsum('xka,knm->xanm',gradJ_wD,esp)
+    # Compute weighted D
+    w_D = w[:, None] * D  # Equivalent to w.reshape((N_grid,1)) * D
+
+    # Compute gradJ_wD more efficiently
+    gradJ_wD = np.einsum('xk,ka->xka', gradJ_w, D, optimize=True)
+    gradJ_wD += np.einsum('k,xka->xka', w, gradJ_D, optimize=True)
+
+    # Compute gradJ_b_fit using optimized einsum
+    gradJ_b_fit = np.einsum('ka,xknm->xanm', w_D, gradJ_esp, optimize=True)
+    gradJ_b_fit += np.einsum('xka,knm->xanm', gradJ_wD, esp, optimize=True)
+
     return gradJ_b_fit
 
 def getGradQtot(mol,J):
@@ -570,7 +581,8 @@ def getGradESPGrid(J,mol,ipesp,grid_atms):
     
     N_grid = ipesp.shape[1]
     # indices of grid points belonging to J
-    gridJ_inds = np.array([k for k in range(0,N_grid) if grid_atms[k]==J])
+    #gridJ_inds = np.array([k for k in range(0,N_grid) if grid_atms[k]==J])
+    gridJ_inds = np.where(grid_atms == J)[0]
     # atomic orbital indices for atom J
     bas_start,bas_end,ao_start,ao_end = mol.aoslice_by_atom()[J]
     aoJ_inds = np.arange(ao_start,ao_end)
@@ -792,9 +804,21 @@ class QMMultipole:
         self.rad_scal = 1.0
         self.weight_mode = "smooth"
         self.hard_cut_scal = 1.5
-        self.weight_smooth_func = "sin"
+        self.weight_smooth_func = "poly"
         self.smooth_sigma = 0.2
         self.corr_espf = True
+        self.grid_block_size = 32
+        self.grad_D = None
+        self.ipesp = None
+        return
+    
+    def reset(self):
+        self.Q = None
+        self.espf_grid = None
+        self.espf_grid_weights = None
+        self.espf_grid_atms = None
+        self.grad_D = None
+        self.ipesp = None
         return
     
     def getMultipoleOperators(self,mol=None):
@@ -811,6 +835,39 @@ class QMMultipole:
         
         return self.Q
     
+    def getGradMultipoleOperators(self,A):
+        '''
+        gets nabla_A Q_a,nm as 3 x N_Q x N_AO x N_AO numpy array
+        '''
+        if self.multipole_method == "espf":
+            gradA_Q = self.getGradESPFMultipoleOperators(A)
+        elif self.multipole_method == "mulliken":
+            gradA_Q = self.getGradMullikenMultipoleOperators(A)
+        else:
+            raise Exception("Error:",self.multipole_method,"is not a recognised multipole method.")
+            
+        return gradA_Q
+    
+    def getGradMullikenMultipoleOperators(self,A):
+        mol = self.mol
+        gradA_Q = getMullikenMultipoleOperatorsAtmDeriv(mol,A,l_max=self.multipole_order,S=None,r_int=None,ip=None,irp=None)
+        return gradA_Q
+    
+    def getGradESPFMultipoleOperators(self,A):
+        mol = self.mol
+        weights = self.espf_grid_weights
+        hard_cut_vdw_scal = self.hard_cut_scal
+        grid_sigma = self.smooth_sigma
+        grid_atms = self.espf_grid_atms
+        gradA_w = calculateGridWeightDerivs(mol,A,self.espf_grid,weights,weight_mode=self.weight_mode,hard_cut_vdw_scal=hard_cut_vdw_scal,sigma=grid_sigma,grid_atms=grid_atms,smooth_func=self.weight_smooth_func)
+        l_max = self.multipole_order
+        if self.ipesp is None:
+            self.ipesp = getIPESPMat(mol,self.espf_grid,block_size=self.grid_block_size)
+        if self.grad_D is None:
+            self.grad_D = getGradESPMatrix(self.espf_grid,mol.atom_coords(),l_max)
+        gradA_Q = getESPFMultipoleOperatorAtmDeriv(mol,A,self.espf_grid,self.espf_fit_vars,gradA_w,self.grad_D,self.ipesp,grid_atms,l_max=l_max,block_size=self.grid_block_size,add_correction=self.corr_espf,Q=self.Q)
+        return gradA_Q
+    
     def getESPFMultipoleOperators(self,mol=None):
         '''
         Generates the ESPF multipole operators
@@ -822,10 +879,22 @@ class QMMultipole:
         self.espf_grid_weights = weights
         self.espf_grid = grid_coords
         self.espf_grid_atms = grid_atms
-        Q,fit_vars = getESPFMultipoleOperators(mol,grid_coords,weights,l_max=self.multipole_order,add_correction=self.corr_espf,return_fit_vars=True)
+        self.evaluateMultipoleIntegrals(mol=mol)
+        Q,fit_vars = getESPFMultipoleOperators(mol,grid_coords,weights,l_max=self.multipole_order,add_correction=self.corr_espf,return_fit_vars=True,S=self.S,r_int=self.r_int,block_size=self.grid_block_size)
         self.espf_fit_vars = fit_vars
         self.Q = Q 
         return 
+    
+    def evaluateMultipoleIntegrals(self,mol=None):
+    
+        if mol is None:
+            mol = self.mol
+        self.S = mol.intor('int1e_ovlp')
+        if self.multipole_order>0:
+            self.r_int = mol.intor('int1e_r')
+        else:
+            self.r_int = None
+        return
     
     def getMullikenMultipoleOperators(self,mol=None):
         '''
@@ -833,7 +902,8 @@ class QMMultipole:
         '''
         if mol is None:
             mol = self.mol
-        self.Q = getMullikenMultipoleOperators(mol,l_max=self.multipole_order)
+        self.evaluateMultipoleIntegrals(mol=mol)
+        self.Q = getMullikenMultipoleOperators(mol,l_max=self.multipole_order,S=self.S,r_int=self.r_int)
         return 
     
     def getMultipoleOperatorDerivatives(self):
