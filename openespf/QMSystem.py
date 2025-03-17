@@ -10,6 +10,14 @@ from copy import deepcopy, copy
 A wrapper for PySCF methods for calculating QM component of QM/MM energies and forces.
 '''
 
+def getDist(x_A_set,x_B,pbc=None):
+    if pbc is None:
+        dx = (x_A_set - x_B[None,:])
+        return np.linalg.norm(dx,axis=1), dx
+    else:
+        dx = x_A_set - x_B[None,:]
+        dx_ni = dx - pbc[None,:]*np.round(dx/pbc[None,:])
+        return np.linalg.norm(dx_ni,axis=1), dx_ni
 
 def calculateGradOvlp(mol,A):
     N_AO = mol.nao
@@ -127,6 +135,13 @@ class QMSystem:
             h_qmmm = h_qm + h_int
             self.mf_int.get_hcore = lambda *args : (h_int)
             self.mf_qmmm.get_hcore = lambda *args : (h_qmmm)
+            
+        # set up 2-e integrals if using incore
+        if self.int_method == "drf" and hasattr(self.mf_qmmm,'incore_anyway'):
+            if self.mf_qmmm.incore_anyway:
+                eri = self.mf_qmmm.mol.intor('cint2e_sph', aosym='s1')
+                eri += np.einsum('Aij,Akl->ijkl',self.Q,self.u2_Q,optimize=True)
+                self.mf_qmmm._eri = ao2mo.restore(8, eri, self.mf_qmmm.mol.nao)
         
         # set up corrections to the generator of v_eff, j and k
         if self.int_method == "drf" and self.drf_method == "get_veff":
@@ -161,6 +176,7 @@ class QMSystem:
                 #self.mf.xc = xc_new 
                 self.mf_qmmm.xc = xc_new
                 self.mf_qmmm.get_jk = lambda *args,**kwargs: self.get_jk_mod(*args,**kwargs,vk_scal=None)
+            
                 
                 
             
@@ -220,7 +236,16 @@ class QMSystem:
         '''
         Generates the coulomb matrix J for a given density matrix dm arising from the DRF 2-e interaction
         '''
-        if len(dm.shape)==2:
+        if type(dm)==type((None,)) or type(dm)==type([]):
+            j = []
+            for dm_n in dm:
+                q = np.einsum('Aij,ij->A',self.Q,dm_n)
+                j.append(np.einsum('A,Aij->ij',q,self.u2_Q))
+            if type(dm)==type((None,)):
+                return tuple(j)
+            elif type(dm)==type([]):
+                return j
+        elif len(dm.shape)==2:
             q = np.einsum('Aij,ij->A',self.Q,dm)
             return np.einsum('A,Aij->ij',q,self.u2_Q)
         elif len(dm.shape)==3:
@@ -229,16 +254,25 @@ class QMSystem:
             #return np.array([j,j])
             return np.einsum('nA,Aij->nij',q,self.u2_Q)
 
-    def get_k_drf(self,dm):
+    def get_k_drf(self,dm,vk_scal=1.0):
         '''
         Generates the exchange matrix K for a given density matrix dm arising from the DRF 2-e interaction
         '''
+        if type(dm)==type((None,)) or type(dm)==type([]):
+            k = []
+            for dm_n in dm:
+                dmQ = np.einsum('jk,Bkl->Bjl',dm_n,self.Q)
+                k.append((1.0/vk_scal)*np.einsum('Aij,Ajl->il',self.u2_Q,dmQ))
+            if type(dm)==type((None,)):
+                return tuple(k)
+            elif type(dm)==type([]):
+                return k
         if len(dm.shape)==2:
             dmQ = np.einsum('jk,Bkl->Bjl',dm,self.Q)
-            return np.einsum('Aij,Ajl->il',self.u2_Q,dmQ)
+            return (1.0/vk_scal)*np.einsum('Aij,Ajl->il',self.u2_Q,dmQ)
         elif len(dm.shape)==3:
             dmQ = np.einsum('njk,Bkl->nBjl',dm,self.Q)
-            return np.einsum('Aij,nAjl->nil',self.u2_Q,dmQ)
+            return (1.0/vk_scal)*np.einsum('Aij,nAjl->nil',self.u2_Q,dmQ)
     
     def get_jk_mod(self, mol=None, dm=None, hermi=1, with_j=True, with_k=True,
                omega=None,vk_scal=1.0):
@@ -254,7 +288,7 @@ class QMSystem:
             vj += self.get_j_drf(dm)
         if with_k:
             if vk_scal is not None:
-                vk += (1.0/vk_scal)*self.get_k_drf(dm)
+                vk += self.get_k_drf(dm,vk_scal=vk_scal)
             else:
                 vk = self.get_k_drf(dm)
         
@@ -282,7 +316,7 @@ class QMSystem:
            
         return
 
-    def setExchRepParameters(self,rep_info,mm_positions):
+    def setExchRepParameters(self,rep_info,mm_positions,pbc=None):
         '''
         Sets up all the repsulion info for calculating 
         '''
@@ -294,15 +328,18 @@ class QMSystem:
         cutoff = self.rep_info["cutoff"]
         # find all MM sites in the cut off and get the type for adding repulsion
         for A in range(0,mm_positions.shape[0]):
-            d_A = np.linalg.norm(self.positions - mm_positions[A,:].reshape((1,3)),axis=1)
+            #d_A = np.linalg.norm(self.positions - mm_positions[A,:].reshape((1,3)),axis=1)
+            d_A,dx_A = getDist(self.positions,mm_positions[A,:],pbc=pbc)
             if np.any(d_A<cutoff):
-                self.rep_positions = np.vstack((self.rep_positions,mm_positions[A,:]))
+                n = np.argmin(d_A)
+                rep_position = self.positions[n,:]-dx_A[n,:]
+                self.rep_positions = np.vstack((self.rep_positions,rep_position[None,:]))
                 self.rep_types.append(rep_info["MM types"][A])
                 self.rep_atoms.append(A)
         
         return 
     
-    
+
     
     def getEnergy(self,units_out="AU",return_terms=False):
         '''

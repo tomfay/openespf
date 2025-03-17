@@ -2,6 +2,7 @@ from openmm import *
 import numpy as np
 from copy import deepcopy
 from timeit import default_timer as timer
+from .Data import *
 
 class MMSystem:
     '''
@@ -28,7 +29,7 @@ class MMSystem:
         if not simulation is None:
             self.simulation = simulation
             self.system = simulation.system
-            self.positions = simulation.context.getState(getPositions=True).getPositions()
+            self.positions = simulation.context.getState(getPositions=True,enforcePeriodicBox=True).getPositions()
             self.topology = simulation.topology
         
         # create a new system object with the test charges/dipoles
@@ -37,11 +38,15 @@ class MMSystem:
             if force.getName() == "AmoebaMultipoleForce":
                 force.setMutualInducedTargetEpsilon(self.induced_dipole_error)
                 force.setMutualInducedMaxIterations(self.max_iter_induced)
+                force.setForceGroup(0)
                 force.updateParametersInContext(simulation.context)
                 self.multipole_force = deepcopy(force)
-                force.setForceGroup(0)
+            #elif force.getName() == "CMMotionRemover":
+            #    force.setForceGroup(2)
             else:
                 force.setForceGroup(1)
+                #force.updateParametersInContext(simulation.context)
+        
         self.multipole_force.setMutualInducedTargetEpsilon(self.induced_dipole_error)
         self.multipole_force.setMutualInducedMaxIterations(self.max_iter_induced)
         # create a new system object for test charges/dipoles and delete all forces
@@ -54,7 +59,7 @@ class MMSystem:
             c = 0.0
             d = [0.,0.,0.]
             q = [0.,0.,0.,0.,0.,0.,0.,0.,0.]
-            axis_type = 0
+            axis_type = self.multipole_force.ZOnly
             kz = 0
             kx = 0
             ky = 0
@@ -95,6 +100,13 @@ class MMSystem:
         
         self.multipole_simulation = app.Simulation(self.multipole_topology,self.multipole_system,integrator,
                                               platform)
+        for i,force in enumerate(self.simulation.system.getForces()):
+            print(force.getName(),force.getForceGroup())
+            #if force.getName() == "AmoebaMultipoleForce":
+            #    self.simulation.system.removeForce(i)
+        for force in self.multipole_simulation.system.getForces():
+            print(force.getName(),force.getForceGroup())
+        
         self.setProbePositions(self.positions)
 
 
@@ -124,7 +136,7 @@ class MMSystem:
         
         N_MM = len(self.positions)
         self.simulation.context.setPositions(self.positions)
-        test_positions = self.multipole_simulation.context.getState(getPositions=True).getPositions()[N_MM:(N_MM+4)]
+        test_positions = self.multipole_simulation.context.getState(getPositions=True,enforcePeriodicBox=True).getPositions()[N_MM:(N_MM+4)]
         self.setProbePositions(self.positions,test_positions=test_positions)
         
         return
@@ -479,7 +491,7 @@ class MMSystem:
             index = N_MM + i
             d = [0.,0.,0.]
             q = [0.,0.,0.,0.,0.,0.,0.,0.,0.]
-            axis_type = 0
+            axis_type = self.multipole_force.ZOnly
             kz = 0
             kx = 0
             ky = 0
@@ -514,7 +526,7 @@ class MMSystem:
             N_MM = self.system.getNumParticles()
             index = N_MM + i
             q = [0.,0.,0.,0.,0.,0.,0.,0.,0.]
-            axis_type = 0
+            axis_type = self.multipole_force.ZOnly
             kz = k_i[0]
             kx = k_i[1]
             ky = k_i[2]
@@ -986,9 +998,9 @@ class MMSystem:
         
         
         if terms is None:
-            energy = self.simulation.context.getState(getEnergy=True).getPotentialEnergy()
+            energy = self.simulation.context.getState(getEnergy=True,enforcePeriodicBox=True).getPotentialEnergy()
         elif terms == "remainder":
-            energy = self.simulation.context.getState(getEnergy=True,groups={1}).getPotentialEnergy()
+            energy = self.simulation.context.getState(getEnergy=True,enforcePeriodicBox=True,groups=1).getPotentialEnergy()
         
         if units_out in ["AU","au","Hartree","hartree"]:
             Eh = 2625.4996352210997 # hartree in kJ/mol
@@ -1004,9 +1016,9 @@ class MMSystem:
         '''
         
         if terms is None:
-            state = self.simulation.context.getState(getEnergy=True,getForces=True)       
+            state = self.simulation.context.getState(getEnergy=True,getForces=True,enforcePeriodicBox=True)       
         elif terms == "remainder":
-            state = self.simulation.context.getState(getEnergy=True,getForces=True,groups={0})
+            state = self.simulation.context.getState(getEnergy=True,getForces=True,enforcePeriodicBox=True,groups=1)
         energy = state.getPotentialEnergy()
         force = state.getForces(asNumpy=True)
         if units_out in ["AU","au"]:
@@ -1021,5 +1033,16 @@ class MMSystem:
         
         return energy._value * conv_energy, force._value * conv_force
     
+    def getPBC(self):
+        '''
+        Gets whether PBC are used and returns pbc box dimensions if they are used
+        '''
+        is_pbc = self.multipole_force.usesPeriodicBoundaryConditions()
+        if not is_pbc:
+            return None
+        else:
+            pbc_dims = self.multipole_topology.getUnitCellDimensions()._value 
+            return np.array(pbc_dims) * NM_TO_BOHR
+        
 
             

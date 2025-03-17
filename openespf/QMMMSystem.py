@@ -36,9 +36,13 @@ class QMMMSystem:
         self.mm_system = MMSystem(mm_simulation)
         self.mm_positions = self.mm_system.getPositions()
         self.mm_system.setQMPositions(self.qm_positions)
+        self.residues = self.getMMResidues()
         
         # printing
         self.print_info = False
+        
+        # uses PBC?
+        self.pbc_dims = self.mm_system.getPBC()
         
         return
     
@@ -71,6 +75,16 @@ class QMMMSystem:
         
         return
     
+    def getPositions(self,enforce_pbc=False):
+        if not enforce_pbc:
+            return self.qm_positions, self.mm_positions
+        else:
+            x_qm = self.enforcePBC(self.qm_positions)
+            x_mm = np.zeros(self.mm_positions.shape)
+            for res in self.residues:
+                x_mm[res,:] = self.enforcePBC(self.mm_positions[res,:])
+            return x_qm, x_mm
+    
     def getEnergy(self,return_terms=False):
         '''
         
@@ -90,14 +104,14 @@ class QMMMSystem:
         
         if self.rep_method == "exch":
             # set up the repulsion
-            self.qm_system.setExchRepParameters(self.rep_info,self.mm_positions)
+            self.qm_system.setExchRepParameters(self.rep_info,self.mm_positions,pbc=self.pbc_dims)
         
         # set up a dictionary for decomposition of the energy terms
         energy_terms = {} 
         # get the MM energy
         energy_terms["mm electrostatics"] = pol_resp["U_0"]
         start = timer()
-        energy_terms["mm remainder"] = self.mm_system.getEnergy(terms="remainder")
+        energy_terms["mm remainder"] = self.mm_system.getEnergy() -  pol_resp["U_0"]
         end = timer()
         if self.print_info : print("MM energy time:",end-start,"s")
         # get the QM + interaction energy 
@@ -150,9 +164,10 @@ class QMMMSystem:
         force_terms_mm["mm electrostatics"] = pol_resp["F_0_mm"]
         force_terms_qm["mm electrostatics"] = pol_resp["F_0_qm"]
         start = timer()
-        E_mm,F_mm = self.mm_system.getEnergyForces(terms="remainder")
-        energy_terms["mm remainder"] = E_mm
-        force_terms_mm["mm remainder"] = F_mm
+        #E_mm,F_mm = self.mm_system.getEnergyForces(terms="remainder")
+        E_mm,F_mm = self.mm_system.getEnergyForces()
+        energy_terms["mm remainder"] = E_mm - pol_resp["U_0"]
+        force_terms_mm["mm remainder"] = F_mm - pol_resp["F_0_mm"]
         end = timer()
         if self.print_info : print("MM energy time:",end-start,"s")
         # get the QM + interaction energy 
@@ -168,7 +183,7 @@ class QMMMSystem:
         force_terms_mm["QM+int"] = self.qm_system.getForcesMM()
         
         F_qm = self.qm_system.getForces(return_terms=True)
-        #print(F_qm)
+
         if type(F_qm) is type([]):
             force_terms_qm = [{ **force_terms_qm, **F_n_qm} for F_n_qm in F_qm]
         else:
@@ -274,5 +289,21 @@ class QMMMSystem:
         F_qm = F_0_qm + np.einsum('kxa,a->kx',F_1_qm,q) + 0.5 * np.einsum('a,kxab,b->kx',q,F_2_qm,q)
         return E,F_qm,F_mm
         
+    def enforcePBC(self,x):
+        '''
+        returns coordinates with centroid in box
+        '''
+        x0 = np.mean(x,axis=0) # centroid coordinates
+        dx = x - x0[None,:] # difference from centroid
+        dx_ni = dx - self.pbc_dims[None,:]*np.round(dx/self.pbc_dims[None,:])
+        x0_inbox = x0 - (x0//self.pbc_dims)*self.pbc_dims # put centroid in box
+        x_pbc = x0_inbox + dx_ni # put set of coords in box
         
-
+        return x_pbc
+        
+    def getMMResidues(self):
+        residue_groups = []
+        for res in self.mm_system.simulation.topology.residues():
+            atoms = [a.index for a in res.atoms()]
+            residue_groups.append(atoms)
+        return residue_groups
