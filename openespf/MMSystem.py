@@ -21,7 +21,7 @@ class MMSystem:
         self.qm_damp = None
         self.test_dipole = 1.0e0
         self.test_charge = 1.0e0
-        self.print_info = True
+        self.print_info = False
         self.induced_dipole_error = 1.0e-6
         self.max_iter_induced = 100
         
@@ -100,12 +100,13 @@ class MMSystem:
         
         self.multipole_simulation = app.Simulation(self.multipole_topology,self.multipole_system,integrator,
                                               platform)
-        for i,force in enumerate(self.simulation.system.getForces()):
-            print(force.getName(),force.getForceGroup())
-            #if force.getName() == "AmoebaMultipoleForce":
-            #    self.simulation.system.removeForce(i)
-        for force in self.multipole_simulation.system.getForces():
-            print(force.getName(),force.getForceGroup())
+        if self.print_info:
+            for i,force in enumerate(self.simulation.system.getForces()):
+                print(force.getName(),force.getForceGroup())
+                #if force.getName() == "AmoebaMultipoleForce":
+                #    self.simulation.system.removeForce(i)
+            for force in self.multipole_simulation.system.getForces():
+                print(force.getName(),force.getForceGroup())
         
         self.setProbePositions(self.positions)
 
