@@ -705,7 +705,7 @@ def softStepPoly(x):
     f = np.zeros(x.shape)
     f[x>1.0] = 1.0 
     # soft part -1<x<1
-    inds = (np.abs(x)<1.0)
+    inds = (np.abs(x)<(1.0-1.0e-5))
     x1 = x[inds]
     x2 = x1 * x1
     x3 = x1 * x2
@@ -721,7 +721,7 @@ def derivSoftStepPoly(x):
     # step function part x>1 f=1, x<-1 f=0
     df = np.zeros(x.shape)
     # soft part -1<x<1
-    inds = (np.abs(x)<1.0)
+    inds = (np.abs(x)<(1.0-1.0e-5))
     x1 = x[inds]
     x2 = x1 * x1
     x4 = x2 * x2
@@ -732,7 +732,7 @@ def derivLogSoftStepPoly(x):
     # step function part |x|>1 df/dx = 0
     dlogf = np.zeros(x.shape)
     # soft part -1<x<1
-    inds = (np.abs(x)<1.0)
+    inds = (np.abs(x)<(1.0-1.0e-5)) # need to cut off before 0 or divide by zero error can occur
     x1 = x[inds]
     x2 = x1 * x1
     x3 = x1 * x2
