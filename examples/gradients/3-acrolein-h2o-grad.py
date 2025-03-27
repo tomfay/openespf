@@ -131,8 +131,9 @@ for x in range(0,3):
     forces_an.append(forces_mm[x,:,0,x])
 
 print("Numerical forces") 
-print(forces_num[2:-2])    
+forces_num = forces_num[2:-2]
 R_vals_num = R_vals[2:-2]
+print(forces_num)    
 print("Analytical forces") 
 print(forces_an[2:-2])  
 # plot energies 
