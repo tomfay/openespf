@@ -25,7 +25,8 @@ import matplotlib.pyplot as plt
 mol = gto.M(atom="3-inputs/acrolein.xyz",unit="Angstrom",basis="pc-0",charge=0)
 # The DFT method is chosen to be a long-range-corrected functional with density fitting
 mf = dft.RKS(mol)
-mf.xc = "PBE0"
+mf.xc = "HF"
+#mf.xc = "PBE0"
 #mf = mf.density_fit(auxbasis="weigendjkfit")
 
 
@@ -131,11 +132,10 @@ for x in range(0,3):
     forces_an.append(forces_mm[x,:,0,x])
 
 print("Numerical forces") 
-forces_num = forces_num[2:-2]
 R_vals_num = R_vals[2:-2]
-print(forces_num)    
-print("Analytical forces") 
-print(forces_an[2:-2])  
+for f in forces_num:
+    print(f[2:-2])     
+
 # plot energies 
 axes = {0:"x",1:"y",2:"z"}
 for x in range(0,3):
@@ -148,7 +148,7 @@ plt.show()
 # plot energies 
 axes = {0:"x",1:"y",2:"z"}
 for x in range(0,3):
-    plt.plot(R_vals_num*1.0e1,(forces_num[x])*1e3,label="Numerical "+axes[x])
+    plt.plot(R_vals_num*1.0e1,(forces_num[x][2:-2])*1e3,label="Numerical "+axes[x])
     plt.plot(R_vals*1.0e1,(forces_an[x])*1e3,'--',label="Analytical "+axes[x])
 plt.xlabel("Separation [Angstrom]")
 plt.ylabel("Force [mH/bohr]")

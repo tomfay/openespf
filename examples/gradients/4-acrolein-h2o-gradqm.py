@@ -35,7 +35,7 @@ topology = pdb.getTopology()
 positions = pdb.getPositions()
 forcefield = ForceField("3-inputs/h2o.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
-platform = Platform.getPlatformByName("OpenCL")
+platform = Platform.getPlatformByName("CPU")
 integrator = VerletIntegrator(1e-16*picoseconds)
 simulation = Simulation(topology, system, integrator,platform)
 simulation.context.setPositions(positions)
@@ -98,7 +98,7 @@ for x in range(0,3):
         # set the MM atom positions
         mm_positions = mm_positions_ref + R_HOH.reshape((1,3))
         qm_positions = qm_positions_ref+0
-        qm_positions[3,:] += R * n_x
+        qm_positions[3,:] += R * n_x *Data.NM_TO_BOHR
         mm_unit = "nanometer"
         qm_unit = "Bohr" # get QM positions in Bohr
         qmmm_system.setPositions(mm_positions=mm_positions,mm_unit=mm_unit,qm_positions=qm_positions,qm_unit=qm_unit)
@@ -134,8 +134,8 @@ for x in range(0,3):
 
 print("Numerical forces") 
 R_vals_num = R_vals[2:-2]
-forces_num = forces_num[2:-2]
-print(forces_num)    
+for f in forces_num:
+    print(f[2:-2])    
 # plot energies 
 axes = {0:"x",1:"y",2:"z"}
 for x in range(0,3):
@@ -148,7 +148,7 @@ plt.show()
 # plot energies 
 axes = {0:"x",1:"y",2:"z"}
 for x in range(0,3):
-    plt.plot(R_vals_num*1.0e1,(forces_num[x])*1e3,label="Numerical "+axes[x])
+    plt.plot(R_vals_num*1.0e1,(forces_num[x][2:-2])*1e3,label="Numerical "+axes[x])
     plt.plot(R_vals*1.0e1,(forces_an[x])*1e3,'--',label="Analytical "+axes[x])
 plt.xlabel("Separation [Angstrom]")
 plt.ylabel("Force [mH/bohr]")
