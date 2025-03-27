@@ -607,7 +607,7 @@ class QMSystem:
         
         return F
     
-    def getMeanMultipoles(self,dm=None,dm_Q=None):
+    def getMeanMultipoles(self,dm=None,dm_Q=None,comb_coulexch=True):
         '''
         Gets the mean multipoles Σ_i<Q_a,i> Σ_i<Q_a,i Q_b,i>, Σ_i=/=j <Q_a,i Q_b,j>
         '''
@@ -634,7 +634,10 @@ class QMSystem:
             av_QQ_2e_x = 0.5 * av_QQ_2e_x
         av_QQ_2e = av_QQ_2e_c - av_QQ_2e_x
         self.dm_Q = dm_Q
-        return av_Q, av_QQ_1e, av_QQ_2e
+        if comb_coulexch:
+            return av_Q, av_QQ_1e, av_QQ_2e
+        else:
+            return av_Q, av_QQ_1e, av_QQ_2e_c, av_QQ_2e_x
     
     def getExchRepHamiltonian(self,mol=None):
         '''
@@ -728,4 +731,91 @@ class QMSystem:
         grad_h_exchrep_B = self.getExchRepDerivMMHamilontian(B,mol=mol)
         F = - np.einsum('xnm,nm',grad_h_exchrep_B,dm,optimize=True)
         return F
+    
+    def getInteractionEnergyDecomposition(self,print_decomp=False):
+        
+        
+        int_energies={}
+        # get mean multipoles
+        if self.int_method == "drf":
+            av_Q, av_QQ_1e, av_QQ_2e_c, av_QQ_2e_x = self.getMeanMultipoles(comb_coulexch=False)
+            av_Q_av_Q = np.outer(av_Q,av_Q)
+            dQ_dQ_1e =  av_QQ_1e - av_Q_av_Q
+            Z = np.zeros(av_Q.shape)
+            N_Q = len(Z)
+            N_QM = self.mf_qmmm.mol.natm
+            Z[0:N_QM] = self.mf_qmmm.mol.atom_charges()
+            
+            av_q = av_Q + Z
+            av_qq = av_QQ_1e + av_QQ_2e_c - av_QQ_2e_x + np.outer(av_Q,Z) + np.outer(Z,av_Q) + np.outer(Z,Z)
+            av_qq_mf = av_QQ_2e_c + np.outer(av_Q,Z) + np.outer(Z,av_Q) + np.outer(Z,Z) 
+            av_qq_fluct = av_QQ_1e - av_QQ_2e_x 
+            # atom-wise contributions to the electrostatic energy (from perm+MM induced dipoles)
+            E_static = av_q * self.U_1
+            E_static_atm = np.sum(E_static.reshape(int(N_Q/N_QM),N_QM),axis=0)
+            # atomwise polarisation energy
+            E_pol = 0.25*np.einsum('ab,ab->a',av_qq,self.U_2) + 0.25*np.einsum('ab,ab->b',av_qq,self.U_2) 
+            E_pol_atm = np.sum(E_pol.reshape(int(N_Q/N_QM),N_QM),axis=0)
+            if print_decomp : print("Electrostatic embedding energy (E_A = U_1A <q_A>) [AU]:")
+            if print_decomp : print(E_static_atm)
+            if print_decomp : print("Total electrostatic embedding energy [AU]:",np.sum(E_static))
+            if print_decomp : print("Polarization embedding energy (E_A = sum_B E_AB = (1/2) sum_B <q_A q_B>U_2AB)[AU]:")
+            if print_decomp : print(E_pol_atm)
+            if print_decomp : print("Total polarization embedding energy [AU]:",np.sum(E_pol))
+            # mean field contribution to polarization energy
+            E_pol_mf = 0.25*np.einsum('ab,ab->a',av_qq_mf,self.U_2) + 0.25*np.einsum('ab,ab->b',av_qq_mf,self.U_2) 
+            E_pol_mf_atm = np.sum(E_pol_mf.reshape(int(N_Q/N_QM),N_QM),axis=0)
+            if print_decomp : print("E_pol = E_pol_mf + E_pol_fluct")
+            if print_decomp : print("Mean-field polarization embedding energy [AU]:")
+            if print_decomp : print(E_pol_mf_atm)
+            if print_decomp : print("Total mean-field polarization embedding energy [AU]:",np.sum(E_pol_mf))
+            # fluctuation field contribution to polarization energy
+            E_pol_fluct = 0.25*np.einsum('ab,ab->a',av_qq_fluct,self.U_2) + 0.25*np.einsum('ab,ab->b',av_qq_fluct,self.U_2) 
+            E_pol_fluct_atm = np.sum(E_pol_fluct.reshape(int(N_Q/N_QM),N_QM),axis=0)
+            if print_decomp : print("Fluctuation polarization embedding energy [AU]:")
+            if print_decomp : print(E_pol_fluct_atm)
+            if print_decomp : print("Total fluctuation polarization embedding energy [AU]:",np.sum(E_pol_fluct))
+            # exchange contribution to polarisation energy
+            E_pol_x = 0.25*np.einsum('ab,ab->a',-av_QQ_2e_x,self.U_2) + 0.25*np.einsum('ab,ab->b',-av_QQ_2e_x,self.U_2) 
+            E_pol_x_atm = np.sum(E_pol_x.reshape(int(N_Q/N_QM),N_QM),axis=0)
+            if print_decomp : print("Exchange polarization embedding energy [AU]:")
+            if print_decomp : print(E_pol_x_atm)
+            if print_decomp : print("Total exchange polarization embedding energy [AU]:",np.sum(E_pol_x))
+            # 1e fluct contribution to polarisation energy
+            E_pol_1efluct = 0.25*np.einsum('ab,ab->a',av_QQ_1e,self.U_2) + 0.25*np.einsum('ab,ab->b',av_QQ_1e,self.U_2) 
+            E_pol_1efluct_atm = np.sum(E_pol_1efluct.reshape(int(N_Q/N_QM),N_QM),axis=0)
+            if print_decomp : print("1e fluct polarization embedding energy [AU]:")
+            if print_decomp : print(E_pol_1efluct_atm)
+            if print_decomp : print("Total 1e fluct polarization embedding energy [AU]:",np.sum(E_pol_1efluct))
+            
+            if print_decomp : print("Total DRF energy [AU]:",np.sum(E_pol)+np.sum(E_static))
+            int_energies["static"] = E_static_atm
+            int_energies["pol"] = E_pol_atm
+            int_energies["pol_mf"]=E_pol_mf_atm
+            int_energies["pol_fluct"]=E_pol_fluct_atm
+            int_energies["pol_xfluct"]=E_pol_x_atm
+            int_energies["pol_1efluct"]=E_pol_1efluct_atm
+            
+            
+        if self.rep_method =="exch":
+            h_exchrep = self.getExchRepHamiltonian()
+            dm = np.array(self.mf_qmmm.make_rdm1())
+            if len(dm.shape)>2:
+                dm = dm[0,:,:] + dm[1,:,:]
+            E_rep = np.einsum('nm,nm',dm,h_exchrep)
+            
+            E_rep_atm = np.zeros((self.mf_qmmm.mol.natm,))
+            for A in range(0,self.mf_qmmm.mol.natm):
+                bas_start,bas_end,ao_start,ao_end = self.mf_qmmm.mol.aoslice_by_atom()[A]
+                h_exchrep_A = np.zeros(h_exchrep.shape)
+                h_exchrep_A[ao_start:ao_end,:] += 0.5 * h_exchrep[ao_start:ao_end,:]
+                h_exchrep_A[:,ao_start:ao_end] += 0.5 * h_exchrep[:,ao_start:ao_end]
+                E_rep_atm[A] = np.einsum('nm,nm',dm,h_exchrep_A)
+            if print_decomp : print("Repulsion energy (Mulliken-style atom-wise decomposition) [AU]:",E_rep_atm)
+            if print_decomp : print("Total repulsion energy [AU]:",E_rep)
+            int_energies["rep"]=E_rep_atm
+            
+            
+            
+        return int_energies
         

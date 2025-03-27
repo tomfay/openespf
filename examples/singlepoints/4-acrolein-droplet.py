@@ -29,7 +29,7 @@ topology = modeller.getTopology()
 positions = modeller.getPositions()
 forcefield = ForceField("4-inputs/h2o.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
-platform = Platform.getPlatformByName("OpenCL")
+platform = Platform.getPlatformByName("CPU")
 integrator = VerletIntegrator(1e-16*picoseconds)
 simulation = Simulation(topology, system, integrator,platform)
 simulation.context.setPositions(positions)
@@ -90,3 +90,7 @@ qmmm_system.qm_system.dm_guess = dm
 E_qmmm = qmmm_system.getEnergy()
 print("E(QM/MM) = ",E_qmmm)
 print("E(QM/MM) - E(QM) - E(MM) = ",E_qmmm - E_qmmm_0)
+
+# get interaction energy decomposition into atom-wise terms
+int_energies = qmmm_system.qm_system.getInteractionEnergyDecomposition(print_decomp=True)
+print(int_energies)
