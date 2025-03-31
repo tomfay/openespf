@@ -64,7 +64,7 @@ qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
 
 qmmm_system.mm_system.use_prelim_mpole = True # set to true to use pre-limit form of dipoles in the energy expansion
-qmmm_systemmm_system.prelim_dr = 5.0e-3 # default value is 1.0e-2
+qmmm_system.mm_system.prelim_dr = 5.0e-3 # default value is 1.0e-2
 
 # get positions for the QM and MM atoms
 mm_positions_ref = simulation.context.getState(getPositions=True).getPositions(asNumpy=True)._value
