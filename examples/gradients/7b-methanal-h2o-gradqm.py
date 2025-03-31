@@ -1,9 +1,12 @@
 # Author: Thomas Fay <tom.patrick.fay@gmail.com>
 
 '''
-An interaction of acrolein and a singlet H2O molecule
-CH2=CH-CH=O H-O-H
-The separation between the C=O O atom and H of H2O is scanned.
+An interaction of methanal and a singlet H2O molecule
+H2C=O H-O-H
+The H2C=O O position is scanned in x,y,z directions and analytic gradients are calculated
+
+In this example a pre-limit for of the dipoles is used in the MM energy expansion. So the dipole is represented as 
+two point charges charge = +/- dipole/dr at x = +/- dr/2. This resolves an error that occurs on some linux CPU systems.
 '''
 
 # import pyscf for setting up the QM part of the calculation
@@ -30,10 +33,10 @@ mf.xc = "HF"
 
 
 # Get info MM He system and set up the OpenMM simulation object
-pdb = PDBFile("4-inputs/h2o.pdb")
+pdb = PDBFile("7-inputs/h2o.pdb")
 topology = pdb.getTopology() 
 positions = pdb.getPositions()
-forcefield = ForceField("3-inputs/h2o.xml")
+forcefield = ForceField("7-inputs/h2o.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
 platform = Platform.getPlatformByName("Reference")
 integrator = VerletIntegrator(1e-16*picoseconds)
@@ -58,7 +61,9 @@ qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole
 # set additional parameters for the exchange repulsion + damping of electrostatics
 qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info=None)
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
-qmmm_system.mm_system.use_prelim_mpole = True
+
+qmmm_system.mm_system.use_prelim_mpole = True # set to true to use pre-limit form of dipoles in the energy expansion
+qmmm_systemmm_system.prelim_dr = 5.0e-3 # default value is 1.0e-2
 
 # get positions for the QM and MM atoms
 mm_positions_ref = simulation.context.getState(getPositions=True).getPositions(asNumpy=True)._value
