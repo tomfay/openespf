@@ -1,0 +1,25 @@
+[project]
+name = "openespf"
+version = "0.1.1"
+authors = [
+  { name="Thomas Fay", email="tom.patrick,fay@gmail.com" },
+]
+description = "A toolkit for performing polarizable QM/MM simulations."
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "MIT"
+license-files = ["LICEN[CS]E*"]
+dependencies = [
+  'numpy',
+  'scipy',
+  'pyscf',
+  'openmm',
+]
+
+[project.urls]
+Homepage = "https://github.com/tomfay/openespf"
+Issues = "https://github.com/tomfay/openespf/issues"

@@ -2,10 +2,10 @@ from setuptools import setup, find_packages
 
 setup(
     name="openespf",  # Replace with your package name
-    version="0.1.0",
+    version="0.1.1",
     packages=find_packages(),
     install_requires=[
-        "numpy", "scipy", "pyscf", "openmm", "matplotlib"
+        "numpy", "scipy", "pyscf", "openmm"
     ],
     author="Thomas Fay",
     author_email="tom.patrick.fay@gmail.com",
