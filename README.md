@@ -14,3 +14,7 @@ Then you can run:
 ```
 pip install git+https://github.com/tomfay/openespf.git
 ```
+If you already have openespf installed, in order to upgrade to the latest version run:
+```
+pip install --upgrade git+https://github.com/tomfay/openespf.git
+```
