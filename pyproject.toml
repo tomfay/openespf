@@ -2,7 +2,7 @@
 name = "openespf"
 version = "0.1.1"
 authors = [
-  { name="Thomas Fay", email="tom.patrick,fay@gmail.com" },
+  { name="Thomas Fay", email="tom.patrick.fay@gmail.com" },
 ]
 description = "A toolkit for performing polarizable QM/MM simulations."
 readme = "README.md"
