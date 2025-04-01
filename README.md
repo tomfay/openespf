@@ -1,6 +1,6 @@
 ### Installation
 
-I'd recommend installing PySCF and OpenMM through pip before installing OpenESPF.
+I'd recommend installing PySCF and OpenMM through pip and conda respectively before installing OpenESPF.
 
 For PySCF first run:
 ```
@@ -8,7 +8,7 @@ pip install --prefer-binary pyscf
 ```
 and for OpenMM:
 ```
-pip install openmm
+conda -c conda-forge openmm
 ```
 Then you can run:
 ```
