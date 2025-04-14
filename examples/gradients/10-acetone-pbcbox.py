@@ -161,14 +161,4 @@ E_qmmm_lin,F_qm_lin,F_mm_lin,F_qm_resp_lin,F_mm_resp_lin = qmmm_system.getEnergy
 #E_qmmm_lin,F_qm_lin,F_mm_lin = qmmm_system.getEnergyForces()
 print("Linear calculation time:", timer()-start, "s")
 
-print("E(QM/MM) (linear) = ", E_qmmm_lin)
-print("Quadratic-linear energy difference = ", E_qmmm-E_qmmm_lin)
-print("Max Quadratic-linear QM force difference = ")
-print(np.max(np.abs(F_qm-F_qm_lin)))
-print("RMS Quadratic-linear QM force difference = ")
-print(np.sqrt(np.mean((F_qm-F_qm_lin)**2)))
-print("Max Quadratic-linear MM force difference = ")
-print(np.max(np.abs(F_mm-F_mm_lin)))
-print("RMS Quadratic-linear QM force difference = ")
-print(np.sqrt(np.mean((F_mm-F_mm_lin)**2)))
 
