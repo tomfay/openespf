@@ -66,6 +66,7 @@ qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole
 qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info=None)
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
 
+
 # get positions for the QM and MM atoms
 mm_positions = simulation.context.getState(getPositions=True).getPositions(asNumpy=True)._value
 mm_unit = "nanometer" # default units for OpenMM is nm
@@ -87,6 +88,11 @@ dm = mf.make_rdm1()
 qmmm_system.qm_system.dm_guess = dm
 
 # Do the QM/MM calculation
-E_qmmm = qmmm_system.getEnergy()
+E_qmmm,F_qm,F_mm = qmmm_system.getEnergyForces()
 print("E(QM/MM) = ",E_qmmm)
 print("E(QM/MM) - E(QM) - E(MM) = ",E_qmmm - E_qmmm_0)
+qmmm_system.mm_system.resp_mode_force = "linear"
+E_qmmm_lin,F_qm_lin,F_mm_lin = qmmm_system.getEnergyForces()
+print("Quadratic-linear energy difference = ", E_qmmm-E_qmmm_lin)
+print("Quadratic-linear QM force difference = ")
+print(F_qm-F_qm_lin)

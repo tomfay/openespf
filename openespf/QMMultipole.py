@@ -339,7 +339,7 @@ def getESPFMultipoleOperators(mol,grid_coords,weights,l_max=0,block_size=16,add_
     
     
     if return_fit_vars:
-        fit_vars = {"A_fit":A_fit,"A_fit_inv":A_fit_inv,"b_fit":b_fit,"D":D,"w":w,"esp":esp}
+        fit_vars = {"A_fit":A_fit,"A_fit_inv":A_fit_inv,"b_fit":b_fit,"D":D,"w":w,"esp":esp,"w_D":w_D}
         return Q, fit_vars
     else:
         return Q
@@ -447,6 +447,7 @@ def getESPFMultipoleOperatorsAtmDerivNum(mol,J,l_max,multipole_fnc,grid_fnc,weig
     
     return gradJ_Q
 
+
 def calculateGridWeightDerivs(mol,J,grid_coords,w,weight_mode="hard",hard_cut_vdw_scal=1.0,sigma=0.2,grid_atms=None,smooth_func="sin"):
     '''
     Calculate derivatives of the grid weights for atom J
@@ -471,11 +472,40 @@ def calculateGridWeightDerivs(mol,J,grid_coords,w,weight_mode="hard",hard_cut_vd
         for alpha in range(0,3):
             gradJ_w[alpha,gridJ_inds] += (1./sigma)*w[gridJ_inds]*np.sum((x[gridJ_inds,:,alpha]/r[gridJ_inds,:])*derivLogSoftStep(y[gridJ_inds,:],func=smooth_func),axis=1)
             gradJ_w[alpha,:] -= (1./sigma)* w * (x[:,J,alpha]/r[:,J])*derivLogSoftStep(y[:,J],func=smooth_func)
-    
+        print("non-zero gradJ_w : ",np.sum(np.abs(gradJ_w)>1.0e-14),"of",(np.prod(np.array(gradJ_w.shape))))
     return gradJ_w
 
-def getESPFMultipoleOperatorAtmDeriv(mol,J,grid_coords,fit_vars,gradJ_w,grad_D,ipesp,grid_atms,l_max=0,block_size=16,add_correction=True,Q=None):
+def calculateGridWeightDerivsOpt(mol,J,grid_coords,w,weight_mode="hard",hard_cut_vdw_scal=1.0,sigma=0.2,grid_atms=None,smooth_func="sin"):
+    '''
+    Calculate derivatives of the grid weights for atom J
+    '''
+    if weight_mode in ["hard","none"]:
+        N_grid = grid_coords.shape[0]
+        gradJ_w = np.zeros((3,N_grid))
+    elif weight_mode == "smooth":
+        R = mol.atom_coords()
+        N = R.shape[0]
+        N_grid = grid_coords.shape[0]
+        gradJ_w = np.zeros((3,N_grid))
+        x = grid_coords.reshape((N_grid,1,3)) - R.reshape((1,N,3))
+        r = np.linalg.norm(x,axis=2)
+        Z = mol.atom_charges()
+        r_vdw = radii.VDW[Z]
+        r_cut = hard_cut_vdw_scal * r_vdw
+        y = (r-sigma-r_cut.reshape((1,N)))/sigma
+        # indices of grid points belonging to J
+        gridJ_inds = np.array([k for k in range(0,N_grid) if grid_atms[k]==J])
+        N_gridJ = len(gridJ_inds)
+        for alpha in range(0,3):
+            gradJ_w[alpha,gridJ_inds] += (1./sigma)*w[gridJ_inds]*np.sum((x[gridJ_inds,:,alpha]/r[gridJ_inds,:])*derivLogSoftStep(y[gridJ_inds,:],func=smooth_func),axis=1)
+            gradJ_w[alpha,:] -= (1./sigma)* w * (x[:,J,alpha]/r[:,J])*derivLogSoftStep(y[:,J],func=smooth_func)
+        inds = np.where(np.linalg.norm(gradJ_w,axis=0)>1.0e-14)[0]
+        gradJ_w = {"grid":gradJ_w[:,inds],"grid_inds":inds}
+    return gradJ_w
+
+def getESPFMultipoleOperatorAtmDeriv(mol,J,grid_coords,fit_vars,gradJ_w,grad_D,ipesp,grid_atms,l_max=0,block_size=16,add_correction=True,Q=None,approx_esp=False):
     
+    print_info = False
     # get coordinates of 
     R = mol.atom_coords()
     
@@ -493,32 +523,52 @@ def getESPFMultipoleOperatorAtmDeriv(mol,J,grid_coords,fit_vars,gradJ_w,grad_D,i
     b_fit = fit_vars["b_fit"]
     A_fit = fit_vars["A_fit"]
     A_fit_inv = fit_vars["A_fit_inv"]
-    
+    w_D = fit_vars["w_D"]
     # empty array for grad
     gradJ_Q = np.zeros((3,N_Q,N_AO,N_AO))
     
+    start = timer()
     # first get grad_J D
-    gradJ_D = getGradJDESP(J,grad_D,grid_atms,l_max)
+    #gradJ_D = getGradJDESP(J,grad_D,grid_atms,l_max)
+    gradJ_D_opt = getGradJDESPOpt(J,grad_D,grid_atms,l_max)
     
+    if print_info: print("gradJ_D time:",timer()-start,"s")
     # gradJ A_fit
-    gradJ_A_fit = getGradAfitESP(gradJ_D,gradJ_w,D,w,l_max)
-    
+    start = timer()
+    #gradJ_A_fit = getGradAfitESP(gradJ_D,gradJ_w,D,w,l_max)
+    gradJ_A_fit = getGradAfitESPOpt(gradJ_D_opt,gradJ_w,D,w,w_D)
+    if print_info: print("gradJ_A_fit time:",timer()-start,"s")
     # the derivative consists of two parts:
     # grad_J (A^-1 b) = (grad_J A^-1 ) b + A^-1 (grad_J b)
     # first the (grad_J A^-1) b part
+    start = timer()
     gradJ_A_fit_inv = np.einsum('xab,bc->xac',gradJ_A_fit,-A_fit_inv,optimize=True)
     gradJ_A_fit_inv = np.einsum('ab,xbc->xac',A_fit_inv,gradJ_A_fit_inv,optimize=True)
     gradJ_Q += np.einsum('xab,bnm->xanm',gradJ_A_fit_inv,b_fit,optimize=True)
-    
+    if print_info: print("gradJ_Q gradJ_A_fit time:",timer()-start,"s")
     # get gradJ_esp
-    gradJ_esp = getGradESPGrid(J,mol,ipesp,grid_atms)
-    
+    start = timer()
+    #gradJ_esp = getGradESPGrid(J,mol,ipesp,grid_atms)
+    gradJ_esp_opt = getGradESPGridOpt(J,mol,ipesp,grid_atms)
+    if print_info: print("gradJ_esp time:",timer()-start,"s")
     # get gradJ b_fit
-    gradJ_b_fit = getGradbfitESP(esp,w,D,gradJ_D,gradJ_w,gradJ_esp)
+    start = timer()
+    #gradJ_b_fit = getGradbfitESP(esp,w,D,gradJ_D,gradJ_w,gradJ_esp)
+    #gradJ_D_opt = getGradJDESPOpt(J,grad_D,grid_atms,l_max)
+    
+    # this line is introduced just to test the quality of using an approximate multipole expression 
+    # - this could enable a faster implementation of the QM gradients
+    if approx_esp:
+        esp_approx = np.einsum('ka,anm->knm',D,Q,optimize=True)
+        gradJ_b_fit = getGradbfitESPOpt(esp_approx,w,D,gradJ_D_opt,gradJ_w,gradJ_esp_opt,w_D)
+    else:
+        gradJ_b_fit = getGradbfitESPOpt(esp,w,D,gradJ_D_opt,gradJ_w,gradJ_esp_opt,w_D)
     
     # second the A^-1 (grad_J b) part
-    gradJ_Q += np.einsum('ab,xbnm->xanm',A_fit_inv,gradJ_b_fit,optimize=True)
     
+    gradJ_Q += np.einsum('ab,xbnm->xanm',A_fit_inv,gradJ_b_fit,optimize=True)
+    if print_info: print("gradJ_b_fit time:",timer()-start,"s")
+    start = timer() 
     if add_correction:
         gradJ_Q_tot = getGradQtot(mol,J)
         gradJ_Q[:,0:N,:,:] += (1./N) * (gradJ_Q_tot - np.sum(gradJ_Q[:,0:N,:,:],axis=1)).reshape((3,1,N_AO,N_AO))
@@ -528,12 +578,62 @@ def getESPFMultipoleOperatorAtmDeriv(mol,J,grid_coords,fit_vars,gradJ_w,grad_D,i
             for alpha in range(0,3):
                 start = (alpha+1)*N
                 end = start+N
-                gradJ_Q[:,start:end,:,:] += (1./N) * (gradJ_mu_tot[:,alpha,:,:] - np.sum(gradJ_Q[:,start:end,:,:],axis=1)).reshape((3,1,N_AO,N_AO))
-                gradJ_Q[:,start:end,:,:] += (-1./N) * (np.einsum('xanm,a->xnm',gradJ_Q[:,0:N,:,:],R[:,alpha])).reshape((3,1,N_AO,N_AO))
-                gradJ_Q[alpha,start:end,:,:] += (-1./N) * Q[J,:,:].reshape((1,N_AO,N_AO))
-                
+                #gradJ_Q[:,start:end,:,:] += (1./N) * (gradJ_mu_tot[:,alpha,:,:] - np.sum(gradJ_Q[:,start:end,:,:],axis=1)).reshape((3,1,N_AO,N_AO))
+                #gradJ_Q[:,start:end,:,:] += (-1./N) * (np.einsum('xanm,a->xnm',gradJ_Q[:,0:N,:,:],R[:,alpha])).reshape((3,1,N_AO,N_AO))
+                #gradJ_Q[alpha,start:end,:,:] += (-1./N) * Q[J,:,:].reshape((1,N_AO,N_AO))
+                gradJ_Q[:,start:end,:,:] += (1./N) * (gradJ_mu_tot[:,alpha,:,:] - np.sum(gradJ_Q[:,start:end,:,:],axis=1))[:,None,:,:]
+                gradJ_Q[:,start:end,:,:] += (-1./N) * (np.einsum('xanm,a->xnm',gradJ_Q[:,0:N,:,:],R[:,alpha]))[:,None,:,:]
+                gradJ_Q[alpha,start:end,:,:] += (-1./N) * Q[J,:,:]
     
+    if print_info: print("correction grad time:",timer()-start,"s")
     return gradJ_Q
+
+def getGradbfitESPOpt(esp,w,D,gradJ_D,gradJ_w,gradJ_esp,w_D):
+    '''
+    An optimised version of below
+    '''
+
+    # Compute gradJ_wD more efficiently
+    #gradJ_wD = np.einsum('xk,ka->xka', gradJ_w, D, optimize=True)
+    dD_row = gradJ_D["rows"]
+    row_inds = gradJ_D["rowinds"]
+    dD_col = gradJ_D["cols"]
+    col_inds = gradJ_D["colinds"]
+    
+    N_grid = esp.shape[0]
+    N_AO = esp.shape[1]
+    N_Q = D.shape[1]
+    # Compute gradJ_b_fit using optimized einsum
+    desp_ao = gradJ_esp["ao"]
+    aos = gradJ_esp["ao_inds"]
+    gradJ_b_fit = np.zeros((3,N_Q,N_AO,N_AO))
+    gradJ_b_fit_ao = np.einsum('ka,xknm->xanm', w_D, desp_ao, optimize=True)
+    gradJ_b_fit[:,:,aos,:] += gradJ_b_fit_ao
+    gradJ_b_fit[:,:,:,aos] += gradJ_b_fit_ao.transpose(0,1,3,2)
+    desp_grid = gradJ_esp["grid"]
+    grids = gradJ_esp["grid_inds"]
+    gradJ_b_fit_grid = np.einsum('ka,xknm->xanm', w_D[grids,:], desp_grid,optimize=True)
+    gradJ_b_fit += gradJ_b_fit_grid + gradJ_b_fit_grid.transpose(0,1,3,2)
+    
+    dD_row = dD_row * w[None,row_inds,None]
+    dD_col = dD_col * w[None,:,None]
+    gradJ_b_fit += np.einsum('xka,knm->xanm',dD_row,esp[row_inds,:,:],optimize=True)
+    gradJ_b_fit[:,col_inds] += np.einsum('xka,knm->xanm',dD_col,esp[:,:],optimize=True)
+    if isinstance(gradJ_w,dict):
+        dw = gradJ_w["grid"]
+        inds = gradJ_w["grid_inds"]
+        dw_D = np.einsum('xk,ka->xka',dw,D[inds,:],optimize=True)
+        gradJ_b_fit += np.einsum('knm,xka->xanm',esp[inds,:,:],dw_D,optimize=True)
+    else:
+        gradJ_w_D = np.einsum('xk,ka->xka',gradJ_w,D,optimize=True)
+        gradJ_b_fit += np.einsum('knm,xka->xanm',esp,gradJ_w_D,optimize=True)
+    #gradJ_b_fit += np.einsum()
+    
+    # Compute gradJ_b_fit using optimized einsum
+    #gradJ_b_fit = np.einsum('ka,xknm->xanm', w_D, gradJ_esp, optimize=True)
+    #gradJ_b_fit += np.einsum('xka,knm->xanm', gradJ_wD, esp, optimize=True)
+
+    return gradJ_b_fit
 
 def getGradbfitESP(esp,w,D,gradJ_D,gradJ_w,gradJ_esp):
     # Compute weighted D
@@ -541,6 +641,7 @@ def getGradbfitESP(esp,w,D,gradJ_D,gradJ_w,gradJ_esp):
 
     # Compute gradJ_wD more efficiently
     gradJ_wD = np.einsum('xk,ka->xka', gradJ_w, D, optimize=True)
+
     gradJ_wD += np.einsum('k,xka->xka', w, gradJ_D, optimize=True)
 
     # Compute gradJ_b_fit using optimized einsum
@@ -597,6 +698,26 @@ def getGradESPGrid(J,mol,ipesp,grid_atms):
     
     return gradJ_esp
 
+def getGradESPGridOpt(J,mol,ipesp,grid_atms):
+    
+    N_grid = ipesp.shape[1]
+    # indices of grid points belonging to J
+    #gridJ_inds = np.array([k for k in range(0,N_grid) if grid_atms[k]==J])
+    gridJ_inds = np.where(grid_atms == J)[0]
+    # atomic orbital indices for atom J
+    bas_start,bas_end,ao_start,ao_end = mol.aoslice_by_atom()[J]
+    aoJ_inds = np.arange(ao_start,ao_end)
+    N_AO = mol.nao
+    
+    gradJ_esp = dict()
+    gradJ_esp["ao"] = -ipesp[:,0:N_grid,aoJ_inds,:]
+    gradJ_esp["ao_inds"] = aoJ_inds
+    gradJ_esp["grid"] = ipesp[:,gridJ_inds,:,:]
+    gradJ_esp["grid_inds"] = gridJ_inds
+
+    
+    return gradJ_esp
+
 def getGradJDESP(J,grad_D,grid_atms,l_max):
     
     gradJ_D = np.zeros(grad_D.shape)
@@ -605,27 +726,85 @@ def getGradJDESP(J,grad_D,grid_atms,l_max):
     N = int(N_Q/N_Q_atm)
     N_grid = grad_D.shape[1]
     # indices of grid points belonging to J
-    gridJ_inds = np.array([k for k in range(0,N_grid) if grid_atms[k]==J])
+    #gridJ_inds = np.array([k for k in range(0,N_grid) if grid_atms[k]==J])
+    gridJ_inds = np.where(grid_atms == J)[0]
     # indices of the multipole operators corresponding to atom J
     if l_max == 0:
         aJ_inds = np.array([J])
     elif l_max == 1:
         aJ_inds = np.array([J+N*x for x in range(0,4)])
-
     gradJ_D[:,gridJ_inds,:] += grad_D[:,gridJ_inds,:] 
     gradJ_D[:,:,aJ_inds] -= grad_D[:,:,aJ_inds]
     
     return gradJ_D
 
-def getGradAfitESP(gradJ_D,gradJ_w,D,w,l_max):
+def getGradJDESPOpt(J,grad_D,grid_atms,l_max):
     
-    N_Q = gradJ_D.shape[2]
-    N_grid = gradJ_D.shape[1]
+    gradJ_D = np.zeros(grad_D.shape)
+    N_Q = grad_D.shape[2]
+    N_Q_atm = getNumMultipolePerAtom(l_max)
+    N = int(N_Q/N_Q_atm)
+    N_grid = grad_D.shape[1]
+    # indices of grid points belonging to J
+    #gridJ_inds = np.array([k for k in range(0,N_grid) if grid_atms[k]==J])
+    gridJ_inds = np.where(grid_atms == J)[0]
+    # indices of the multipole operators corresponding to atom J
+    if l_max == 0:
+        aJ_inds = np.array([J])
+    elif l_max == 1:
+        aJ_inds = np.array([J+N*x for x in range(0,4)])
+    gradJ_D = dict()
+    gradJ_D["rows"] = grad_D[:,gridJ_inds,:] 
+    gradJ_D["rowinds"] = gridJ_inds 
+    gradJ_D["cols"] = -grad_D[:,:,aJ_inds]
+    gradJ_D["colinds"] = aJ_inds
+    
+    return gradJ_D
+
+def getGradAfitESP(gradJ_D,gradJ_w,D,w,l_max):
+    N_Q = D.shape[1]
+    N_grid = D.shape[0]
     gradJ_A_fit = np.zeros((3,N_Q,N_Q))
     w_D = w.reshape((N_grid,1)) * D
     for alpha in range(0,3):
-        gradJ_A_fit[alpha,:,:] = (gradJ_D[alpha,:,:].T).dot(w_D) + (D.T).dot(gradJ_w[alpha,:].reshape((N_grid,1)) * D) + (w_D.T).dot(gradJ_D[alpha,:,:])
+        gradJ_A_fit[alpha,:,:] = (gradJ_D[alpha,:,:].T).dot(w_D) + (D.T).dot(gradJ_w[alpha,:][:,None] * D) + (w_D.T).dot(gradJ_D[alpha,:,:])
     
+    return gradJ_A_fit 
+
+def getGradAfitESPOpt(gradJ_D,gradJ_w,D,w,w_D):
+    
+    N_Q = D.shape[1]
+    N_grid = D.shape[0]
+    gradJ_A_fit = np.zeros((3,N_Q,N_Q))
+    
+    dD_row = gradJ_D["rows"]
+    row_inds = gradJ_D["rowinds"]
+    dD_col = gradJ_D["cols"]
+    col_inds = gradJ_D["colinds"]
+   
+    #for alpha in range(0,3):
+    #    gradJ_A_fit[alpha,:,:] += (dD_row[alpha].T).dot(w_D[row_inds,:]) 
+    #    gradJ_A_fit[alpha,:,:] += (w_D[row_inds,:].T).dot(dD_row[alpha,:,:])
+    #    gradJ_A_fit[alpha,col_inds,:] += (dD_col[alpha,:,:].T).dot(w_D[:,col_inds]) 
+    #    gradJ_A_fit[alpha,:,col_inds] += (w_D[:,col_inds].T).dot(dD_col[alpha,:,:]) 
+    
+    gradJ_A_fit = np.einsum('xka,kb->xab',dD_row,w_D[row_inds,:]) 
+    gradJ_A_fit[:,col_inds,:] += np.einsum('xka,kb->xab',dD_col,w_D) 
+    #gradJ_A_fit += np.einsum('ka,xkb->xab',w_D[row_inds,:],dD_row) 
+    #gradJ_A_fit += np.einsum('ka,xkb->xab',w_D[:,col_inds],dD_col) 
+    gradJ_A_fit += gradJ_A_fit.transpose(0,2,1)
+    if isinstance(gradJ_w,dict):
+        dw = gradJ_w["grid"]
+        inds = gradJ_w["grid_inds"]
+        gradJ_A_fit += np.einsum('ka,xkb->xab',D[inds,:],dw[:,:,None]*D[None,inds,:])
+    else:
+        gradJ_A_fit += np.einsum('ka,xkb->xab',D,gradJ_w[:,:,None]*D[None,:,:])
+    #for alpha in range(0,3):
+    #    gradJ_A_fit[alpha,:,:] += (D.T).dot(gradJ_w[alpha,:][:,None] * D)
+    
+    #for alpha in range(0,3):
+    #    gradJ_A_fit[alpha,:,:] = (gradJ_D[alpha,:,:].T).dot(w_D) + (D.T).dot(gradJ_w[alpha,:][:,None] * D) + (w_D.T).dot(gradJ_D[alpha,:,:])
+
     return gradJ_A_fit 
 
 
@@ -801,7 +980,7 @@ class QMMultipole:
         self.rad_grid_method = "vdw"
         self.n_ang = 38
         self.n_rad = 8
-        self.rad_scal = 1.0
+        self.rad_scal = 1.25
         self.weight_mode = "smooth"
         self.hard_cut_scal = 1.5
         self.weight_smooth_func = "poly"
@@ -859,7 +1038,8 @@ class QMMultipole:
         hard_cut_vdw_scal = self.hard_cut_scal
         grid_sigma = self.smooth_sigma
         grid_atms = self.espf_grid_atms
-        gradA_w = calculateGridWeightDerivs(mol,A,self.espf_grid,weights,weight_mode=self.weight_mode,hard_cut_vdw_scal=hard_cut_vdw_scal,sigma=grid_sigma,grid_atms=grid_atms,smooth_func=self.weight_smooth_func)
+        #gradA_w = calculateGridWeightDerivs(mol,A,self.espf_grid,weights,weight_mode=self.weight_mode,hard_cut_vdw_scal=hard_cut_vdw_scal,sigma=grid_sigma,grid_atms=grid_atms,smooth_func=self.weight_smooth_func)
+        gradA_w = calculateGridWeightDerivsOpt(mol,A,self.espf_grid,weights,weight_mode=self.weight_mode,hard_cut_vdw_scal=hard_cut_vdw_scal,sigma=grid_sigma,grid_atms=grid_atms,smooth_func=self.weight_smooth_func)
         l_max = self.multipole_order
         if self.ipesp is None:
             self.ipesp = getIPESPMat(mol,self.espf_grid,block_size=self.grid_block_size)

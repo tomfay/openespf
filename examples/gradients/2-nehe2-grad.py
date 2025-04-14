@@ -54,6 +54,7 @@ qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole
 # set additional parameters for the exchange repulsion + damping of electrostatics
 qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info=None)
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
+qmmm_system.mm_system.resp_mode_force = "linear"
 
 # get positions for the QM and MM atoms
 mm_positions = simulation.context.getState(getPositions=True).getPositions()

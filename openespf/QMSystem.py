@@ -1,4 +1,4 @@
-from pyscf import gto, scf, dft, tddft, ao2mo, lib, grad
+from pyscf import gto, scf, dft, tddft, ao2mo, lib, grad, dispersion
 from pyscf.dft import numint
 import numpy as np
 from scipy.linalg import sqrtm, inv, solve
@@ -19,16 +19,26 @@ def getDist(x_A_set,x_B,pbc=None):
         dx_ni = dx - pbc[None,:]*np.round(dx/pbc[None,:])
         return np.linalg.norm(dx_ni,axis=1), dx_ni
 
-def calculateGradOvlp(mol,A):
+def calculateGradOvlp(mol,A,row=True,col=True):
     N_AO = mol.nao
     N_bas = mol.nbas
     bas_start,bas_end,ao_start,ao_end = mol.aoslice_by_atom()[A]
     ao_inds = np.arange(ao_start,ao_end)
     ip = mol.intor('int1e_ipovlp',shls_slice=(bas_start,bas_end,0,N_bas))
     gradA_S_tot = np.zeros((3,N_AO,N_AO))
-    gradA_S_tot[:,ao_inds,:] -= ip
-    gradA_S_tot[:,:,ao_inds] -= np.swapaxes(ip,1,2)
+    if row:
+        gradA_S_tot[:,ao_inds,:] -= ip
+    if col:
+        gradA_S_tot[:,:,ao_inds] -= ip.transpose(0,2,1)
     return gradA_S_tot
+
+def calculateGradOvlpRows(mol,A):
+    N_AO = mol.nao
+    N_bas = mol.nbas
+    bas_start,bas_end,ao_start,ao_end = mol.aoslice_by_atom()[A]
+    ao_inds = np.arange(ao_start,ao_end)
+    ip = mol.intor('int1e_ipovlp',shls_slice=(bas_start,bas_end,0,N_bas))
+    return -ip,ao_start,ao_end
 
 class QMSystem:
     def __init__(self,qm_mf,qm_resp=None,int_method="drf",rep_method="exch",multipole_order=0,multipole_method="espf"):
@@ -43,6 +53,10 @@ class QMSystem:
         self.multipole = QMMultipole(mol=self.mol,multipole_order=self.multipole_order,multipole_method=self.multipole_method)
         self.dm_guess=None
         self.drf_method = "get_jk"
+        
+        # debug options
+        self.jdrf_pre = 1.0
+        self.kdrf_pre = 1.0
         return
     
     def getPositions(self):
@@ -88,6 +102,7 @@ class QMSystem:
         # copy the scf object - methods *should* be modifiable in mf_qmmm without modifying original
         self.mf_qmmm = (deepcopy(self.mf))
         self.mf_int = (deepcopy(self.mf))
+        
         self.mf_int.xc = "HF"
         self.mf_int.omega = 0.0
     
@@ -129,7 +144,7 @@ class QMSystem:
             # finally get the self-energy term
             self.Q_Sinv = np.einsum('ank,km->anm',self.Q,self.S_inv)
             self.u2_Q = np.einsum('ab,bnm->anm',u_2,self.Q)
-            h_int = h_int + 0.5*np.einsum('ank,akm->nm',self.Q_Sinv,self.u2_Q)
+            h_int += + 0.5*np.einsum('ank,akm->nm',self.Q_Sinv,self.u2_Q)
             # combine the interaction and QM system hamiltonians
             h_qm = self.mf.get_hcore()
             h_qmmm = h_qm + h_int
@@ -198,7 +213,9 @@ class QMSystem:
             raise Exception("Response object is not set. Cannot create a modified version.")
             
         self.resp_qmmm = self.resp.copy()
+        self.resp_qmmm.reset()
         self.resp_qmmm._scf = self.mf_qmmm 
+        type(self.resp).__init__(self.resp_qmmm,self.mf_qmmm)
         
         if self.int_method == "drf" and self.drf_method == "get_veff":
             # modify the response object
@@ -239,20 +256,26 @@ class QMSystem:
         if type(dm)==type((None,)) or type(dm)==type([]):
             j = []
             for dm_n in dm:
-                q = np.einsum('Aij,ij->A',self.Q,dm_n)
-                j.append(np.einsum('A,Aij->ij',q,self.u2_Q))
+                #q = np.einsum('Aij,ij->A',self.Q,dm_n)
+                #j.append(np.einsum('A,Aij->ij',q,self.u2_Q))
+                q = np.einsum('bkl,lk->b',self.Q,dm_n) # re-defined for consistency with pyscf
+                j.append(self.jdrf_pre*np.einsum('bij,b->ij',self.u2_Q,q))
             if type(dm)==type((None,)):
                 return tuple(j)
             elif type(dm)==type([]):
                 return j
         elif len(dm.shape)==2:
-            q = np.einsum('Aij,ij->A',self.Q,dm)
-            return np.einsum('A,Aij->ij',q,self.u2_Q)
+            #q = np.einsum('Aij,ij->A',self.Q,dm)
+            #return np.einsum('A,Aij->ij',q,self.u2_Q)
+            q = np.einsum('bkl,lk->b',self.Q,dm) # re-defined for consistency with pyscf
+            return self.jdrf_pre*np.einsum('bij,b->ij',self.u2_Q,q)
         elif len(dm.shape)==3:
-            q = np.einsum('Aij,nij->nA',self.Q,dm)
+            #q = np.einsum('Aij,nij->nA',self.Q,dm)
             #j = np.sum(np.einsum('nA,Aij->nij',q,self.UQ),axis=0)
             #return np.array([j,j])
-            return np.einsum('nA,Aij->nij',q,self.u2_Q)
+            #return np.einsum('nA,Aij->nij',q,self.u2_Q)
+            q = np.einsum('bkl,nlk->nb',self.Q,dm) # re-defined for consistency with pyscf
+            return self.jdrf_pre*np.einsum('Aij,nA->nij',self.u2_Q,q)
 
     def get_k_drf(self,dm,vk_scal=1.0):
         '''
@@ -261,18 +284,24 @@ class QMSystem:
         if type(dm)==type((None,)) or type(dm)==type([]):
             k = []
             for dm_n in dm:
-                dmQ = np.einsum('jk,Bkl->Bjl',dm_n,self.Q)
-                k.append((1.0/vk_scal)*np.einsum('Aij,Ajl->il',self.u2_Q,dmQ))
+                #dmQ = np.einsum('jk,Bkl->Bjl',dm_n,self.Q)
+                #k.append((1.0/vk_scal)*np.einsum('Aij,Ajl->il',self.u2_Q,dmQ))
+                dmQ = np.einsum('lk,Bkj->Blj',dm_n,self.Q)
+                k.append(self.kdrf_pre*(1.0/vk_scal)*np.einsum('Ail,Alj->ij',self.u2_Q,dmQ))
             if type(dm)==type((None,)):
                 return tuple(k)
             elif type(dm)==type([]):
                 return k
         if len(dm.shape)==2:
-            dmQ = np.einsum('jk,Bkl->Bjl',dm,self.Q)
-            return (1.0/vk_scal)*np.einsum('Aij,Ajl->il',self.u2_Q,dmQ)
+            #dmQ = np.einsum('jk,Bkl->Bjl',dm,self.Q)
+            #return (1.0/vk_scal)*np.einsum('Aij,Ajl->il',self.u2_Q,dmQ)
+            dmQ = np.einsum('lk,Bkj->Blj',dm,self.Q)
+            return self.kdrf_pre*(1.0/vk_scal)*np.einsum('Ail,Alj->ij',self.u2_Q,dmQ)
         elif len(dm.shape)==3:
-            dmQ = np.einsum('njk,Bkl->nBjl',dm,self.Q)
-            return (1.0/vk_scal)*np.einsum('Aij,nAjl->nil',self.u2_Q,dmQ)
+            #dmQ = np.einsum('njk,Bkl->nBjl',dm,self.Q)
+            #return (1.0/vk_scal)*np.einsum('Aij,nAjl->nil',self.u2_Q,dmQ)
+            dmQ =  np.einsum('nlk,Bkj->nBlj',dm,self.Q)
+            return self.kdrf_pre*(1.0/vk_scal)*np.einsum('Ail,nAlj->nij',self.u2_Q,dmQ)
     
     def get_jk_mod(self, mol=None, dm=None, hermi=1, with_j=True, with_k=True,
                omega=None,vk_scal=1.0):
@@ -297,10 +326,10 @@ class QMSystem:
   
     def setPolarizationEnergyResp(self,pol_resp):
         if pol_resp["units"] in ["AU","au"]:
-            conv_U_0 = 1 
-            conv_U_1 = 1 
-            conv_U_2 = 1
-            conv_d = 1 
+            conv_U_0 = 1.0 
+            conv_U_1 = 1.0 
+            conv_U_2 = 1.0
+            conv_d = 1.0 
         else:
             print("Warning: unknown polarization energy units.")
         self.U_0 = pol_resp["U_0"] * conv_U_0
@@ -309,10 +338,16 @@ class QMSystem:
         if "F_0_qm" in pol_resp.keys():
             self.F_0_qm = pol_resp["F_0_qm"] * conv_U_0 * conv_d
             self.F_1_qm = pol_resp["F_1_qm"] * conv_U_1 * conv_d
-            self.F_2_qm = pol_resp["F_2_qm"] * conv_U_2 * conv_d
             self.F_0_mm = pol_resp["F_0_mm"] * conv_U_0 * conv_d
             self.F_1_mm = pol_resp["F_1_mm"] * conv_U_1 * conv_d
-            self.F_2_mm = pol_resp["F_2_mm"] * conv_U_2 * conv_d
+            if pol_resp["F_2_qm"] is not None:
+                self.F_2_qm = pol_resp["F_2_qm"] * conv_U_2 * conv_d
+            else:
+                self.F_2_qm = None
+            if pol_resp["F_2_mm"] is not None:
+                self.F_2_mm = pol_resp["F_2_mm"] * conv_U_2 * conv_d
+            else:
+                self.F_2_mm = None
            
         return
 
@@ -349,9 +384,9 @@ class QMSystem:
         # run the ground state SCF QM/MM calculation
         self.createModifiedSCF()
         self.mf_qmmm.kernel(dm=self.dm_guess)
-        
         # get the energy
         E = self.mf_qmmm.energy_tot()
+    
         
         # get response energy
         if self.resp is not None:
@@ -369,12 +404,12 @@ class QMSystem:
         #E = E * conv
         if self.resp is None:
             if return_terms:
-                return {"QM+int":E* conv,"u_0":self.u_0* conv}
+                return {"QM+int":E* conv,"u_0":self.u_0*conv}
             else:
                 return (E+self.u_0)* conv
         else:
             if return_terms:
-                return [{"QM+int":E_n* conv,"u_0":self.u_0* conv} for E_n in E]
+                return [{"QM+int":E_n* conv,"u_0":self.u_0*conv} for E_n in E]
             else:
                 return [(E_n+self.u_0)* conv for E_n in E]
 
@@ -384,6 +419,7 @@ class QMSystem:
         '''
         self.grad_mf_qmmm = self.mf_qmmm.nuc_grad_method()
         self.grad_mf = self.mf.nuc_grad_method()
+        
         if not "HF" in self.mf.__class__.__name__:
             if not self.mf.xc == "HF":
                 self.grad_mf_qmmm.grid_response=True
@@ -398,74 +434,227 @@ class QMSystem:
         self.grad_mf_qmmm.extra_force = self.getExtraForceInt
         
         
+        
         return 
+    
+    def createModifiedGradResp(self):
+        '''
+        Create a modified grad td object
+        '''
+        if "RO" in type(self.mf_qmmm).__name__ or "U" in type(self.mf_qmmm).__name__:
+            raise Exception("Error: Resp gradient only implemented for RKS/RHF references.")
+        
+        self.grad_resp_qmmm = self.resp_qmmm.nuc_grad_method()
+        self.grad_resp = self.resp.nuc_grad_method()
+        if not "HF" in self.mf.__class__.__name__:
+            if not self.mf.xc == "HF":
+                self.grad_resp_qmmm.grid_response=True
+                self.grad_resp.grid_response=True
+        dm = self.mf_qmmm.make_rdm1()
+        #self.grad_mf_qmmm.extra_force = lambda *args: self.getExtraForceInt(*args)
+        self.grad_resp_qmmm.extra_force = self.getExtraForceRespInt
+        
+        return
     
     def getExtraForceInt(self,atom_id,envs):
         '''
         returns the QM/MM interaction component of the forces
         '''
         #print("Extra force for atom:",atom_id)
-        dm0 = self.mf_qmmm.make_rdm1()
+        #dm0 = self.mf_qmmm.make_rdm1()
+        #dm0 = 
         # get the number of atomic orbitals
         # make the dm a N_sigma x N_AO x N_AO array so UKS, ROKS and RKS can be treated consistently
-        dm0 = np.array(dm0)
+        dm0 = np.array(envs["dm0"])
         N_AO = dm0.shape[-1]
         if len(dm0.shape)==2:
             dm0 = dm0.reshape((1,N_AO,N_AO))
-        dm = np.einsum('snm->nm',dm0)
+        dm = lib.einsum('snm->nm',dm0)
         F = np.zeros(self.F_0_qm[atom_id,:].shape)
-        if self.int_method == "drf":
+        if self.int_method == "drf" :
             # first the terms that do not involve gradients of the charge operators
             # first deal with the zero electron part
             Z = self.mf_qmmm.mol.atom_charges()
             N_QM = len(Z)
-            F_ind = np.einsum('xaA,A->xa',self.F_2_qm[atom_id,:,:,0:N_QM],Z)
-            F += np.einsum('xA,A->x',self.F_1_qm[atom_id,:,0:N_QM],Z) + np.einsum('xA,A->x',F_ind[:,0:N_QM],0.5*Z)
-            # 1e induction term
-            F += np.einsum('a,xa->x',self.av_Q,F_ind+self.F_1_qm[atom_id,:,:])
-            # 1e self term + 2e term
-            F += 0.5 * np.einsum('xab,ab->x',self.F_2_qm[atom_id,:,:,:],self.av_QQ_1e+self.av_QQ_2e)
-            #print("") 
-            #F_nogradQ = F+0
-            #print("F_nogradQ=",F)
+            if self.F_2_qm is not None:
+                F_ind = lib.einsum('xaA,A->xa',self.F_2_qm[atom_id,:,:,0:N_QM],Z)
+                F += lib.einsum('xA,A->x',self.F_1_qm[atom_id,:,0:N_QM],Z) + lib.einsum('xA,A->x',F_ind[:,0:N_QM],0.5*Z)
+                # 1e induction term
+                F += lib.einsum('a,xa->x',self.av_Q,F_ind+self.F_1_qm[atom_id,:,:],optimize=True)
+                # 1e self term + 2e term
+                F += 0.5 * lib.einsum('xab,ab->x',self.F_2_qm[atom_id,:,:,:],self.av_QQ_1e+self.av_QQ_2e,optimize=True)
             
             # the multipole operator gradient terms
             grad_Q = 1.0*self.multipole.getGradMultipoleOperators(atom_id)
-            av_grad_Q = (np.einsum('xanm,nm->xa',grad_Q,dm,optimize=True))
-            #av_grad_Q = 0.5*(np.einsum('xanm,nm->xa',grad_Q,dm)+np.einsum('xanm,mn->xa',grad_Q,dm))
+            av_grad_Q = (lib.einsum('xanm,nm->xa',grad_Q,dm,optimize=True))
+            #av_grad_Q = 0.5*(lib.einsum('xanm,nm->xa',grad_Q,dm)+lib.einsum('xanm,mn->xa',grad_Q,dm))
             #print(av_grad_Q)
             # u_1 term
-            F -= np.einsum('xa,a->x',av_grad_Q,self.u_1)
+            F -= lib.einsum('xa,a->x',av_grad_Q,self.u_1)
             # self term
-            dm0_grad_Q = np.einsum('snm,xanl->sxaml',dm0,grad_Q,optimize=True)
-            dm_grad_Q = np.einsum('sxaml->xaml',dm0_grad_Q,optimize=True)
-            dm_grad_Q_Sinv = np.einsum('xaml,lk->xamk',dm_grad_Q,self.S_inv,optimize=True)
-            F -= np.einsum('xamk,akm->x',dm_grad_Q_Sinv,self.u2_Q,optimize=True) # no factor of 1/2 because of dQ/dx Q + Q dQ/dx
+            dm0_grad_Q = lib.einsum('snm,xanl->sxaml',dm0,grad_Q,optimize=True)
+            #dm_grad_Q = lib.einsum('sxaml->xaml',dm0_grad_Q,optimize=True)
+            #dm_grad_Q = np.sum(dm0_grad_Q,axis=0)
+            #dm_grad_Q_Sinv = lib.einsum('xaml,lk->xamk',dm_grad_Q,self.S_inv,optimize=True)
+            #F -= lib.einsum('xamk,akm->x',dm_grad_Q_Sinv,self.u2_Q,optimize=True) # no factor of 1/2 because of dQ/dx Q + Q dQ/dx
+            #F -= lib.einsum('xamk,amk->x',dm_grad_Q,self.uQSinv,optimize=True)
+            # optimized version
+            F -= np.einsum('xamk,akm->x',grad_Q,self.uSinvQdm,optimize=True)
             # grad S inv term
-            grad_S = calculateGradOvlp(self.mol,atom_id)
-            grad_Sinv = np.einsum('xnl,lm->xnm',grad_S,self.S_inv,optimize=True)
-            grad_Sinv = -np.einsum('nl,xlm->xnm',self.S_inv,grad_Sinv,optimize=True)
-            grad_Sinv_Q = np.einsum('xnl,alm->xanm',grad_Sinv,self.Q,optimize=True)
-            A = np.einsum('anl,xalm->xnm',self.u2_Q,grad_Sinv_Q,optimize=True)
-            F -= 0.5*np.einsum('xnm,nm->x',A,dm)
-            #print(np.einsum('xamk,akm->x',dm_grad_Q_Sinv,self.u2_Q))
+            # This part can be optimised by exploiting the sparsity of grad_S
+            #grad_Sinv_Q = calculateGradOvlp(self.mol,atom_id)
+            #grad_Sinv_Q = lib.einsum('xnl,lm->xnm',grad_Sinv_Q,self.S_inv,optimize=True)
+            #grad_Sinv_Q = -lib.einsum('nl,xlm->xnm',self.S_inv,grad_Sinv_Q,optimize=True)
+            #grad_Sinv_Q = lib.einsum('xnl,alm->xanm',grad_Sinv_Q,self.Q,optimize=True)
+            ##A = lib.einsum('anl,xalm->xnm',self.u2_Q,grad_Sinv_Q,optimize=True)
+            ##F -= 0.5*lib.einsum('xnm,nm->x',A,dm)
+            #F -= 0.5*lib.einsum('anl,xalm,nm->x',self.u2_Q,grad_Sinv_Q,dm)
+            
+            # optimized version
+            grad_S,ao_start,ao_end = calculateGradOvlpRows(self.mol,atom_id)
+            A = np.einsum('xnm,aml->xanl',grad_S,self.SinvQdm)
+            F += 1.0*lib.einsum('amn,xanm->x',self.uQSinv[:,:,ao_start:ao_end],A)
+            #A = np.einsum('anm,xlm->xanl',self.uQSinv,grad_S)
+            #F += 0.5*lib.einsum('xanm,anm->x',A,self.SinvQdm[:,:,ao_start:ao_end])
+            
+            #print(lib.einsum('xamk,akm->x',dm_grad_Q_Sinv,self.u2_Q))
             # the 2e terms
-            grad_QQ_2e_c = np.einsum('xa,b->xab',av_grad_Q,self.av_Q,optimize=True)
-            grad_QQ_2e_c += np.einsum('xa,b->xba',av_grad_Q,self.av_Q,optimize=True)
-            dm0_Q = self.dm_Q
-            grad_QQ_2e_x = np.einsum('sxanm,sbmn->xab',dm0_grad_Q,dm0_Q,optimize=True)
-            grad_QQ_2e_x += np.einsum('xab->xba',grad_QQ_2e_x,optimize=True)
+            #grad_QQ_2e_c = lib.einsum('xa,b->xab',av_grad_Q,self.av_Q,optimize=True)
+            #grad_QQ_2e_c += grad_QQ_2e_c.transpose(0,2,1)
+            F -= self.jdrf_pre*np.einsum('xa,a->x',av_grad_Q,self.av_uQ)
+            #grad_QQ_2e_c += lib.einsum('xa,b->xba',av_grad_Q,self.av_Q,optimize=True)
+            #dm0_Q = self.dm_Q
+            #grad_QQ_2e_x = lib.einsum('sxanm,sbmn->xab',dm0_grad_Q,dm0_Q,optimize=True)
+            #grad_QQ_2e_x += grad_QQ_2e_x.transpose(0,2,1)
+            #grad_QQ_2e_x += lib.einsum('xab->xba',grad_QQ_2e_x,optimize=True)
+            #if dm0.shape[0]==1:
+                #grad_QQ_2e_x *= 0.5 
+            
+            #F -= 0.5*lib.einsum('xab,ab->x',self.jdrf_pre*grad_QQ_2e_c - self.kdrf_pre*grad_QQ_2e_x , self.u_2)
+            #F -= 0.5*lib.einsum('xab,ab->x',- self.kdrf_pre*grad_QQ_2e_x , self.u_2)
+            
             if dm0.shape[0]==1:
-                grad_QQ_2e_x *= 0.5 
-            F -= 0.5*np.einsum('xab,ab->x',grad_QQ_2e_c - grad_QQ_2e_x , self.u_2)
+                prefactor = 0.5*self.kdrf_pre
+            else:
+                prefactor = 1.0*self.kdrf_pre
+            F += prefactor * lib.einsum('sxanm,samn->x',dm0_grad_Q,self.dm0_uQ,optimize=True)
+            
+                
             #print("F_gradQ=",F-F_nogradQ)
         
         if self.rep_method == "exch":
             F += self.getExchRepForceQM(dm,atom_id)
         
+        self.F_int[atom_id,:] += F
+        #print("extra force:",self.grad_mf.extra_force(atom_id,envs))
         F -= self.grad_mf.extra_force(atom_id,envs)
-        #F *= 0
+        
         return -F
+    
+    def getExtraForceRespInt(self,atom_id,envs):
+        '''
+        returns the extra force for the response object
+        '''
+        F = np.zeros((3,))
+        #Currently just extracts and saves the relaxed one particle density
+        if not hasattr(self,"ddm1"):
+            x = envs["x"]
+            y = envs["y"]
+            self.ddm1 = envs["dmz1doo"] # AO basis difference density matrix
+            #self.ddm1 = 0.5*(envs["dmz1doo"]+envs["dmz1doo"].T)
+            #self.ddm1u = envs["dmzoo"] 
+            dm0 = self.mf_qmmm.make_rdm1()
+            self.dm1 = dm0 + self.ddm1
+        if not hasattr(self,"dmxpy"):
+            self.dmxpy = envs["dmxpy"] # X+Y in AO basis
+        if not hasattr(self,"dmxmy"):
+            self.dmxmy = envs["dmxmy"] # X-Y in AO basis
+        
+        
+        
+        # get the extra force from the other components
+        F += self.grad_resp.extra_force(atom_id,envs)
+        
+        return F
+    
+    def resetRespForce(self):
+        delattr(self, "ddm1")
+        delattr(self, "dm1")
+        delattr(self,"dmxpy")
+        delattr(self,"dmxmy")
+        return
+    
+    def getMeanMultipolesResp(self,dm=None,dm_Q=None,comb_coulexch=True):
+        '''
+        Get response contributions to the mean multipoles.
+        Needs to be added to ground state contribution.
+        Currently assumes spin-restricted response properties
+        '''
+        ddm1 = 0.5*(self.ddm1+self.ddm1.T)
+        dmxpy = self.dmxpy
+        dmxmy = self.dmxmy
+        
+        #dmxpy = 0.5*(dmxpy+dmxpy.T)
+        #dmxmy = 0.5*(dmxmy+dmxmy.T)
+        
+        # ground state terms
+        if dm is None:
+            dm = self.mf_qmmm.make_rdm1()
+        N_AO = dm.shape[-1]
+        if dm_Q is None:
+            dm_Q = np.einsum('kn,akm->anm',dm,self.Q)
+        av_Q0 = np.einsum('anm,nm->a',self.Q,dm)
+        
+        # difference density mutliplied by Q is used multiple times
+        ddm1_Q = np.einsum('nm,akm->ank',ddm1,self.Q)
+        
+        # average difference mutlipoles
+        av_Q = np.einsum('anm,nm->a',self.Q,ddm1)
+        #av_Qu = np.einsum('anm,nm->a',self.Q,self.ddm1u)
+        
+        # average difference 1e Qa Qb
+        av_QQ_1e = np.einsum('anm,bnm->ab',self.Q_Sinv,ddm1_Q)
+        #av_QQ_1e = 0.5 * (av_QQ_1e+av_QQ_1e.T)
+        # average 2e contribution to difference density according to Furche 2002
+        #av_QQ_2e_c = np.einsum('a,b->ab',av_Q,av_Q0) # P D "coulomb" term
+        
+       
+        #av_QQ_2e_c += 4.0*np.einsum('a,b->ab',av_Q_xpy,av_Q_xpy) # (X+Y)(X+Y) "coulomb" term
+        av_QQ_2e_c = np.outer(av_Q,av_Q0) 
+        if self.resp_qmmm.singlet:
+            av_Q_xpy = np.einsum('anm,nm',self.Q,dmxpy)
+            av_QQ_2e_c += 4.0*np.outer(av_Q_xpy,av_Q_xpy)
+        #av_QQ_2e_c = 0.5*(av_QQ_2e_c+av_QQ_2e_c.T)
+        # This is based on expressions in Liu & Liang doi: 10.1063/1.3659312
+        # minus sign is absorbed in "exchange" like term
+        Q_ddm1 = np.einsum('anm,nl->aml',self.Q,ddm1)
+        Q_dm = np.einsum('anm,ln->aml',self.Q,dm)
+
+        Q_xpy = np.einsum('anm,ln->aml',self.Q,(dmxpy))
+        Q_xpy_xpyT = np.einsum('anm,nl->aml',self.Q,(dmxpy+dmxpy.T))
+
+        Q_xmy = np.einsum('anm,ln->aml',self.Q,(dmxmy))
+        Q_xmy_xmyT = np.einsum('anm,nl->aml',self.Q,(dmxmy-dmxmy.T))
+        
+        #av_QQ_2e_x = -0.125 * np.einsum('aml,blm->ab',Q_ddm1,Q_dm) -0.125 * np.einsum('bml,alm->ab',Q_ddm1,Q_dm)
+        #av_QQ_2e_x += -0.125 * np.einsum('aml,blm->ab',Q_dm,Q_ddm1) -0.125 * np.einsum('bml,alm->ab',Q_dm,Q_ddm1)
+        av_QQ_2e_x = -0.5 * np.einsum('aml,blm->ab',Q_ddm1,Q_dm) 
+    
+        
+        av_QQ_2e_x += -1.0 * np.einsum('aml,blm->ab',Q_xpy,Q_xpy_xpyT)
+        #av_QQ_2e_x += -0.5 * np.einsum('bml,alm->ab',Q_xpy,Q_xpy_xpyT)
+        #av_QQ_2e_x += -0.5 * np.einsum('aml,blm->ab',Q_xpy_xpyT,Q_xpy_xpyT)
+        
+        av_QQ_2e_x += -1.0 * np.einsum('aml,blm->ab',Q_xmy,Q_xmy_xmyT)
+        #av_QQ_2e_x += -0.5 * np.einsum('bml,alm->ab',Q_xmy,Q_xmy_xmyT)
+        #av_QQ_2e_x += -0.5 * np.einsum('aml,blm->ab',Q_xmy_xmyT,Q_xmy_xmyT)
+        # multiply by -1 for consistency with SCF definition
+        #av_QQ_2e_x = 0.5*(av_QQ_2e_x + av_QQ_2e_x.T)
+        av_QQ_2e_x *= -1.0
+        if comb_coulexch:
+            return av_Q, av_QQ_1e, self.jdrf_pre*av_QQ_2e_c - self.kdrf_pre*av_QQ_2e_x
+        else:
+            return av_Q, av_QQ_1e, self.jdrf_pre*av_QQ_2e_c, self.kdrf_pre*av_QQ_2e_x
     
     def hcore_int_generator(self):
         '''
@@ -506,14 +695,34 @@ class QMSystem:
         
         return h_int_deriv
     
+    def preComputeForceTerms(self):
+        '''
+        pre-computes terms used in force evaluation
+        '''
+        self.uQSinv = np.einsum('anm,ml->anl',self.u2_Q,self.S_inv)
+        dm = np.array(self.mf_qmmm.make_rdm1())
+        if len(dm.shape)==2:
+            self.dm0_uQ = np.einsum('snm,amk->sank',dm[None,:,:],self.u2_Q,optimize=True)
+        else:
+            self.dm0_uQ = np.einsum('snm,amk->sank',dm,self.u2_Q,optimize=True)
+        if len(dm.shape)==3:
+            dm = dm[0,:,:] + dm[1,:,:]
+        self.SinvQdm = np.einsum('nm,aml->anl',self.S_inv,self.Q)
+        self.SinvQdm = np.einsum('anm,ml->anl',self.SinvQdm,dm)
+        self.uSinvQdm = np.einsum('ab,bnm->anm',self.u_2,self.SinvQdm)
+        self.av_uQ = np.einsum('ab,b->a',self.u_2,self.av_Q)
+        
+        return
+    
     def getForces(self,units_out="AU",return_terms=False):
         '''
         
         '''
         
         # create a modified SCF/DFT gradient object
+        self.preComputeForceTerms()
         self.createModifiedGradSCF()
-        
+        self.F_int = np.zeros(self.positions.shape)
         F = -self.grad_mf_qmmm.kernel()
         #f_0 = self.getForceQMu0()
         f_0 = np.zeros(F.shape)
@@ -526,17 +735,24 @@ class QMSystem:
             a0 = 0.52917721092e-1 # bohr in nm
             conv = Eh/a0
         
+        
+        
         #E = E * conv
-        if self.resp is None:
-            if return_terms:
-                return {"QM+int":F* conv,"u_0":f_0* conv}
-            else:
-                return (F+f_0)* conv
+        #if self.resp is None:
+        #    if return_terms:
+        #        return {"QM+int":F* conv,"u_0":f_0* conv}
+        #    else:
+        #        return (F+f_0)* conv
+        #else:
+        #    if return_terms:
+        #        return [{"QM+int":F_n* conv,"u_0":f_0* conv} for F_n in F]
+        #    else:
+        #        return [(F_n+f_0)* conv for F_n in F]
+            
+        if return_terms:
+            return {"QM+int":F* conv,"u_0":f_0* conv}
         else:
-            if return_terms:
-                return [{"QM+int":F_n* conv,"u_0":f_0* conv} for F_n in F]
-            else:
-                return [(F_n+f_0)* conv for F_n in F]
+            return (F+f_0)* conv
     
     def getGradQMPolExp(self,atm_id):
         # set up the gradient of the polarization energy expansion 
@@ -578,22 +794,22 @@ class QMSystem:
             # first deal with the zero electron part
             Z = self.mf_qmmm.mol.atom_charges()
             N_QM = len(Z)
-            F_ind = np.einsum('kxaA,A->kxa',self.F_2_mm[:,:,:,0:N_QM],Z)
-            F += np.einsum('kxA,A->kx',self.F_1_mm[:,:,0:N_QM],Z) + np.einsum('kxA,A->kx',F_ind[:,:,0:N_QM],0.5*Z)
-
-            # next the induction 1e terms
+            # mean multipoles
             av_Q, av_QQ_1e, av_QQ_2e = self.getMeanMultipoles()
-            # 1e induction term
-            F += np.einsum('a,kxa',av_Q,F_ind+self.F_1_mm)
-            # 1e self term
-            F += 0.5 * np.einsum('kxab,ab->kx',self.F_2_mm,av_QQ_1e)
-            # 2e term
-            F += 0.5 * np.einsum('kxab,ab->kx',self.F_2_mm,av_QQ_2e)
+            if self.F_2_mm is not None:
+                F_ind = np.einsum('kxaA,A->kxa',self.F_2_mm[:,:,:,0:N_QM],Z)
+                F += np.einsum('kxA,A->kx',self.F_1_mm[:,:,0:N_QM],Z) + np.einsum('kxA,A->kx',F_ind[:,:,0:N_QM],0.5*Z)
+                # 1e induction term
+                F += np.einsum('a,kxa',av_Q,F_ind+self.F_1_mm,optimize=True)
+                # 1e self term
+                F += 0.5 * np.einsum('kxab,ab->kx',self.F_2_mm,av_QQ_1e,optimize=True)
+                # 2e term
+                F += 0.5 * np.einsum('kxab,ab->kx',self.F_2_mm,av_QQ_2e,optimize=True)
             
             # save the average charges
-            self.av_Q = av_Q
-            self.av_QQ_1e = av_QQ_1e
-            self.av_QQ_2e = av_QQ_2e
+            self.av_Q = av_Q+0
+            self.av_QQ_1e = av_QQ_1e+0
+            self.av_QQ_2e = av_QQ_2e+0
         
         if self.rep_method == "exch":
             dm = self.mf_qmmm.make_rdm1()
@@ -604,6 +820,222 @@ class QMSystem:
                 F[B,:] += F_B
                 
                 
+        
+        return F
+    
+
+    def getForcesRespMM(self):
+        '''
+        Returns the force on MM atoms
+        '''
+        F = np.zeros(self.F_0_mm.shape)
+        dm0 = np.array(self.mf_qmmm.make_rdm1())
+        if len(dm0.shape)>2:
+            dm0 = dm0[0,:,:] + dm0[1,:,:]
+            
+        
+                
+        if self.int_method == "drf":
+            # first deal with the zero electron part
+            Z = self.mf_qmmm.mol.atom_charges()
+            N_QM = len(Z)
+            av_Q,av_QQ_1e, av_QQ_2e= self.getMeanMultipolesResp()
+            # mean multipoles
+            if self.F_2_mm is not None:
+                F_ind = np.einsum('kxaA,A->kxa',self.F_2_mm[:,:,:,0:N_QM],Z)
+
+                # this term is excluded because it is included in the reference part
+                #F += np.einsum('kxA,A->kx',self.F_1_mm[:,:,0:N_QM],Z) + np.einsum('kxA,A->kx',F_ind[:,:,0:N_QM],0.5*Z)
+
+                # 1e induction term
+                F += np.einsum('a,kxa',av_Q,F_ind+self.F_1_mm)
+                # 1e self term
+                F += 0.5 * np.einsum('kxab,ab->kx',self.F_2_mm,av_QQ_1e)
+                F += 1.0 * np.einsum('kxab,ab->kx',self.F_2_mm,av_QQ_2e)
+
+            
+            
+        if self.rep_method == "exch":
+            dm = 0.5*(self.ddm1+self.ddm1.T)
+            for k,B in enumerate(self.rep_atoms): # loop over atoms in the cutoff radius
+                F_B = self.getExchRepForceMM(dm,k)
+                F[B,:] += F_B
+        
+                
+
+        return F
+    
+    def getMeanTotalMultipoles(self):
+        '''
+        Get average total multipoles and the multipole correlations
+        '''
+        av_Q, av_QQ_1e, av_QQ_2e = self.getMeanMultipoles()
+        Z = self.mol.atom_charges()
+        z = np.zeros(av_Q.shape)
+        z[0:len(Z)] = Z
+        q = av_Q + z
+        qq = av_QQ_1e + av_QQ_2e + np.outer(av_Q,z) + np.outer(z,av_Q) + np.outer(z,z)
+        return q, qq
+    
+    def getMeanTotalMultipolesResp(self):
+        '''
+        Get average total multipoles and the multipole correlations for the resp state
+        '''
+        #av_Q0, av_QQ_1e0, av_QQ_2e0 = self.getMeanMultipoles()
+        av_Q, av_QQ_1e, av_QQ_2e = self.getMeanMultipolesResp()
+        av_QQ_2e *= 2.0 # multiply by 2.0 because of how av_QQ_2e is defined for resp states
+    
+        #av_Q += av_Q0
+        #av_QQ_1e += av_QQ_1e0
+        #av_QQ_2e += av_QQ_2e0
+        Z = self.mol.atom_charges()
+        z = np.zeros(av_Q.shape)
+        z[0:len(Z)] = Z
+        q = av_Q # no + z
+        qq = av_QQ_1e + av_QQ_2e + np.outer(av_Q,z) + np.outer(z,av_Q) # no z z^T term
+        return q, qq
+    
+    def getForcesRespQM(self,state=1):
+        '''
+        Get QM forces for resp state
+        '''
+        self.createModifiedGradResp()
+        F = -self.grad_resp_qmmm.kernel(state=state)
+        
+        if self.int_method == "drf":
+            # first the Hellman-Feynman parts
+            # first deal with the zero electron part
+            Z = self.mf_qmmm.mol.atom_charges()
+            N_QM = len(Z)
+            # mean multipoles
+            av_Q, av_QQ_1e, av_QQ_2e = self.getMeanMultipolesResp()
+            if self.F_2_qm is not None:
+                F_ind = np.einsum('kxaA,A->kxa',self.F_2_qm[:,:,:,0:N_QM],Z)
+                # next the induction 1e terms
+                # 1e induction term
+                F += np.einsum('a,kxa',av_Q,F_ind+self.F_1_qm)
+                # 1e self term
+                F += 0.5 * np.einsum('kxab,ab->kx',self.F_2_qm,av_QQ_1e)
+                F += 1.0 * np.einsum('kxab,ab->kx',self.F_2_qm,av_QQ_2e)
+            
+            # then deal with the dQ/dR terms
+            dm = 0.5*(self.ddm1+self.ddm1.T)
+            dm0 = self.mf_qmmm.make_rdm1()
+            dmxpy = self.dmxpy
+            dmxmy = self.dmxmy
+            
+            av_Q0 = np.einsum('anm,nm->a',self.Q,dm0,optimize=True)
+            av_Q_xpy = np.einsum('anm,nm',self.Q,dmxpy,optimize=True)
+            av_uQ = np.einsum('ab,b->a',self.u_2,av_Q)
+            av_uQ0 = np.einsum('ab,b->a',self.u_2,av_Q0)
+            av_uQ_xpy = np.einsum('ab,b->a',self.u_2,av_Q_xpy)
+            
+            Q_dm = np.einsum('anm,nl->aml',self.Q,dm,optimize=True)
+            Q_dm0 = np.einsum('anm,ln->aml',self.Q,dm0,optimize=True)
+            uQ_dm = np.einsum('ab,bnm->anm',self.u_2,Q_dm)
+            uQ_dm0 = np.einsum('ab,bnm->anm',self.u_2,Q_dm0)
+            
+            Q_xpy = np.einsum('anm,ln->aml',self.Q,(dmxpy),optimize=True)
+            Q_xpy_xpyT = np.einsum('anm,nl->aml',self.Q,(dmxpy+dmxpy.T),optimize=True)
+            uQ_xpy = np.einsum('ab,bnm->anm',self.u_2,Q_xpy)
+            uQ_xpy_xpyT = np.einsum('ab,bnm->anm',self.u_2,Q_xpy_xpyT)
+            
+            Q_xmy = np.einsum('anm,ln->aml',self.Q,(dmxmy),optimize=True)
+            Q_xmy_xmyT = np.einsum('anm,nl->aml',self.Q,(dmxmy-dmxmy.T),optimize=True)
+            uQ_xmy = np.einsum('ab,bnm->anm',self.u_2,Q_xmy)
+            uQ_xmy_xmyT = np.einsum('ab,bnm->anm',self.u_2,Q_xmy_xmyT)
+
+            uQSinv = self.uQSinv
+            SinvQdm = np.einsum('nm,aml->anl',self.S_inv,self.Q,optimize=True)
+            SinvQdm = np.einsum('anm,ml->anl',SinvQdm,dm,optimize=True)
+            uSinvQdm = np.einsum('ab,bnl->anl',self.u_2,SinvQdm,optimize=True)
+            
+            for atom_id in range(0,N_QM):
+                # the multipole operator gradient terms
+                grad_Q = self.multipole.getGradMultipoleOperators(atom_id)
+                
+                av_grad_Q = (np.einsum('xanm,nm->xa',grad_Q,dm,optimize=True))
+                av_grad_Q0 = (np.einsum('xanm,nm->xa',grad_Q,dm0,optimize=True))
+                # u_1 term
+                F[atom_id,:] -= np.einsum('xa,a->x',av_grad_Q,self.u_1)
+                # self interaction term
+                # self term grad Q part This can be sped-up by pre-computing dm.Sinv
+                #dm_grad_Q = np.einsum('nm,xanl->xaml',dm,grad_Q,optimize=True)
+                #dm_grad_Q_Sinv = np.einsum('xaml,lk->xamk',dm_grad_Q,self.S_inv,optimize=True)
+                #F[atom_id,:] -= np.einsum('xamk,akm->x',dm_grad_Q_Sinv,self.u2_Q,optimize=True) # no factor of 1/2 because of dQ/dx Q + Q dQ/dx
+                F[atom_id,:] -= np.einsum('xamk,akm->x',grad_Q,uSinvQdm,optimize=True)
+                
+                # grad S inv term. This can be sped-up like the SCF term with pre-computation
+                #grad_S = calculateGradOvlp(self.mol,atom_id)
+                #grad_Sinv = np.einsum('xnl,lm->xnm',grad_S,self.S_inv,optimize=True)
+                #grad_Sinv = -np.einsum('nl,xlm->xnm',self.S_inv,grad_Sinv,optimize=True)
+                #grad_Sinv_Q = np.einsum('xnl,alm->xanm',grad_Sinv,self.Q,optimize=True)
+                #A = np.einsum('anl,xalm->xnm',self.u2_Q,grad_Sinv_Q,optimize=True)
+                #F[atom_id,:] -= 0.5*np.einsum('xnm,nm->x',A,dm)
+                
+                # optimized version
+                grad_S,ao_start,ao_end = calculateGradOvlpRows(self.mol,atom_id)
+                A = np.einsum('xnm,aml->xanl',grad_S,SinvQdm,optimize=True)
+                F[atom_id,:] += 1.0*np.einsum('amn,xanm->x',uQSinv[:,:,ao_start:ao_end],A,optimize=True)
+    
+                # gradient of the 2e coulomb term
+                #av_QQ_2e_c += 4.0*np.einsum('a,b->ab',av_Q_xpy,av_Q_xpy) # (X+Y)(X+Y) "coulomb" term
+                #av_grad_QQ_2e_c = np.einsum('xa,b->xab',av_grad_Q,av_Q0) + np.einsum('a,xb->xab',av_Q,av_grad_Q0) 
+                #if self.resp_qmmm.singlet:
+                #    av_grad_Q_xpy = np.einsum('xanm,nm->xa',grad_Q,dmxpy)
+                #    av_grad_QQ_2e_c += 4.0*np.einsum('xa,b->xab',av_grad_Q_xpy,av_Q_xpy) + 4.0*np.einsum('a,xb->xab',av_Q_xpy,av_grad_Q_xpy)
+                #
+                F[atom_id,:] -= self.jdrf_pre*np.einsum('xa,a->x',av_grad_Q,av_uQ0) + np.einsum('a,xa->x',av_uQ,av_grad_Q0) 
+                if self.resp_qmmm.singlet:
+                    av_grad_Q_xpy = np.einsum('xanm,nm->xa',grad_Q,dmxpy)
+                    F[atom_id,:] += -self.jdrf_pre*8.0*np.einsum('xa,a->x',av_grad_Q_xpy,av_uQ_xpy) #+ -4.0*np.einsum('a,xa->x',av_uQ_xpy,av_grad_Q_xpy)
+                
+                #av_grad_QQ_2e_c *= 0.0
+                #av_grad_QQ_2e_c = 0.5*(av_grad_QQ_2e_c + av_grad_QQ_2e_c.transpose(0,2,1))
+                # exchange terms
+                # minus sign is absorbed in "exchange" like term
+                # This can likely be sped-up by absorbing equivalent terms - needs to be assessed carefully!
+                grad_Q_dm = np.einsum('xanm,nl->xaml',grad_Q,dm)
+                grad_Q_dm0 = np.einsum('xanm,ln->xaml',grad_Q,dm0)
+                #av_grad_QQ_2e_x_1 = -0.5 * np.einsum('xaml,blm->xab',grad_Q_dm,Q_dm0,optimize=True) #-0.25 * np.einsum('xbml,alm->xab',grad_Q_dm,Q_dm0)
+                #av_grad_QQ_2e_x_1 += -0.5 * np.einsum('aml,xblm->xab',Q_dm,grad_Q_dm0,optimize=True) #-0.25 * np.einsum('bml,xalm->xab',Q_dm,grad_Q_dm0)  
+                #av_grad_QQ_2e_x_1 += -0.125 * np.einsum('xaml,blm->xab',grad_Q_dm0,Q_dm) -0.125 * np.einsum('xbml,alm->xab',grad_Q_dm0,Q_dm)
+                #av_grad_QQ_2e_x_1 += -0.125 * np.einsum('aml,xblm->xab',Q_dm0,grad_Q_dm) -0.125 * np.einsum('bml,xalm->xab',Q_dm0,grad_Q_dm)  
+                F[atom_id,:] -= -0.5 *self.kdrf_pre* np.einsum('xaml,alm->x',grad_Q_dm,uQ_dm0,optimize=True)
+                F[atom_id,:] -= -0.5 *self.kdrf_pre* np.einsum('aml,xalm->x',uQ_dm,grad_Q_dm0,optimize=True)
+                    
+                    
+                grad_Q_xpy = np.einsum('xanm,ln->xaml',grad_Q,(dmxpy),optimize=True)
+                grad_Q_xpy_xpyT = np.einsum('xanm,nl->xaml',grad_Q,(dmxpy+dmxpy.T),optimize=True)
+                #av_grad_QQ_2e_x_2 = -0.5 * (np.einsum('xaml,blm->xab',grad_Q_xpy,Q_xpy_xpyT) + np.einsum('xbml,alm->xab',grad_Q_xpy,Q_xpy_xpyT) )
+                #av_grad_QQ_2e_x_2 += -0.5 * (np.einsum('aml,xblm->xab',Q_xpy,grad_Q_xpy_xpyT) + np.einsum('bml,xalm->xab',Q_xpy,grad_Q_xpy_xpyT) )
+                #av_grad_QQ_2e_x_2 = -1.0* (np.einsum('xaml,blm->xab',grad_Q_xpy,Q_xpy_xpyT,optimize=True) )
+                #av_grad_QQ_2e_x_2 += -1.0 * (np.einsum('aml,xblm->xab',Q_xpy,grad_Q_xpy_xpyT,optimize=True)  )
+                F[atom_id,:] -= -self.kdrf_pre* (np.einsum('xaml,alm->x',grad_Q_xpy,uQ_xpy_xpyT,optimize=True) )
+                F[atom_id,:] -= -self.kdrf_pre* (np.einsum('aml,xalm->x',uQ_xpy,grad_Q_xpy_xpyT,optimize=True)  )
+                
+                grad_Q_xmy = np.einsum('xanm,ln->xaml',grad_Q,(dmxmy),optimize=True)
+                grad_Q_xmy_xmyT = np.einsum('xamn,nl->xaml',grad_Q,(dmxmy-dmxmy.T),optimize=True)
+                #av_grad_QQ_2e_x_3 = -0.5 * (np.einsum('xaml,blm->xab',grad_Q_xmy,Q_xmy_xmyT) + np.einsum('xbml,alm->xab',grad_Q_xmy,Q_xmy_xmyT) )
+                #av_grad_QQ_2e_x_3 += -0.5 * (np.einsum('aml,xblm->xab',Q_xmy,grad_Q_xmy_xmyT) + np.einsum('bml,xalm->xab',Q_xmy,grad_Q_xmy_xmyT) )
+                #av_grad_QQ_2e_x_3 = -1.0 * (np.einsum('xaml,blm->xab',grad_Q_xmy,Q_xmy_xmyT) + np.einsum('aml,xblm->xab',Q_xmy,grad_Q_xmy_xmyT) )
+                F[atom_id,:] -= -self.kdrf_pre* (np.einsum('xaml,alm->x',grad_Q_xmy,uQ_xmy_xmyT,optimize=True) + np.einsum('aml,xalm->x',uQ_xmy,grad_Q_xmy_xmyT,optimize=True) )
+                #av_grad_QQ_2e_x =  (av_grad_QQ_2e_x_1 + av_grad_QQ_2e_x_2 + av_grad_QQ_2e_x_3)
+                #av_grad_QQ_2e_x =  (  av_grad_QQ_2e_x_3)
+                # combine the 2e terms
+                #av_grad_QQ_2e =  self.kdrf_pre*av_grad_QQ_2e_x
+                
+                    
+                #F[atom_id,:] -= np.einsum('ab,xab->x',self.u_2,av_grad_QQ_2e)
+        
+        
+        # get the exchange repulsion force
+        if self.rep_method == "exch":
+            dm = 0.5*(self.ddm1+self.ddm1.T)
+            for atom_id in range(0,N_QM):
+                F[atom_id,:] += self.getExchRepForceQM(dm,atom_id)
+        
+        F += self.F_int
         
         return F
     
@@ -632,12 +1064,13 @@ class QMSystem:
         av_QQ_2e_x = np.einsum('sanm,sbmn->ab',dm_Q,dm_Q)
         if dm.shape[0] == 1:
             av_QQ_2e_x = 0.5 * av_QQ_2e_x
-        av_QQ_2e = av_QQ_2e_c - av_QQ_2e_x
+        
+        av_QQ_2e = self.jdrf_pre*av_QQ_2e_c - self.kdrf_pre*av_QQ_2e_x
         self.dm_Q = dm_Q
         if comb_coulexch:
             return av_Q, av_QQ_1e, av_QQ_2e
         else:
-            return av_Q, av_QQ_1e, av_QQ_2e_c, av_QQ_2e_x
+            return av_Q, av_QQ_1e, self.jdrf_pre*av_QQ_2e_c, self.kdrf_pre*av_QQ_2e_x
     
     def getExchRepHamiltonian(self,mol=None):
         '''
@@ -722,14 +1155,16 @@ class QMSystem:
         if mol is None:
             mol = self.mol
         grad_h_exchrep_A = self.getExchRepDerivQMHamilontian(A,mol=mol)
-        F = - np.einsum('xnm,nm',grad_h_exchrep_A,dm,optimize=True)
+        F = - np.einsum('xnm,nm->x',grad_h_exchrep_A,dm,optimize=True)
+        #F = - np.einsum('xnm,nm->x',grad_h_exchrep_A,dm)
         return F
     
     def getExchRepForceMM(self,dm,B,mol=None):
         if mol is None:
             mol = self.mol
         grad_h_exchrep_B = self.getExchRepDerivMMHamilontian(B,mol=mol)
-        F = - np.einsum('xnm,nm',grad_h_exchrep_B,dm,optimize=True)
+        F = - np.einsum('xnm,nm->x',grad_h_exchrep_B,dm,optimize=True)
+        #F = - np.einsum('xnm,nm->x',grad_h_exchrep_B,dm)
         return F
     
     def getInteractionEnergyDecomposition(self,print_decomp=False):
@@ -815,6 +1250,8 @@ class QMSystem:
             if print_decomp : print("Total repulsion energy [AU]:",E_rep)
             int_energies["rep"]=E_rep_atm
             
+        int_energies["self"] = self.mf.energy_tot(dm=self.mf_qmmm.make_rdm1())
+        if print_decomp : print("QM self energy [AU]:",int_energies["self"])
             
             
         return int_energies

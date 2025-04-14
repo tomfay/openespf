@@ -44,6 +44,9 @@ class QMMMSystem:
         # uses PBC?
         self.pbc_dims = self.mm_system.getPBC()
         
+        # resp state properties/forces default value
+        self.resp_states = [1]
+        
         return
     
     
@@ -106,18 +109,24 @@ class QMMMSystem:
             # set up the repulsion
             self.qm_system.setExchRepParameters(self.rep_info,self.mm_positions,pbc=self.pbc_dims)
         
+        
+        
         # set up a dictionary for decomposition of the energy terms
         energy_terms = {} 
         # get the MM energy
-        energy_terms["mm electrostatics"] = pol_resp["U_0"]
+        if self.int_method == "drf":
+            energy_terms["mm electrostatics"] = pol_resp["U_0"]
+        else:
+            energy_terms["mm electrostatics"] = self.mm_system.getElectrostaticEnergy()
         start = timer()
-        energy_terms["mm remainder"] = self.mm_system.getEnergy() -  pol_resp["U_0"]
+        energy_terms["mm remainder"] = self.mm_system.getEnergy() - energy_terms["mm electrostatics"]
         end = timer()
         if self.print_info : print("MM energy time:",end-start,"s")
         # get the QM + interaction energy 
         # TODO - modify to deal with multiple energies from excited states possibly return a list of dictionaries, one for each state
         start = timer()
         qm_energy_terms = self.qm_system.getEnergy(return_terms=True)
+        
         if type(qm_energy_terms) is type([]):
             energy_terms = [{ **energy_terms, **state_energy_terms} for state_energy_terms in qm_energy_terms]
         else:
@@ -153,36 +162,56 @@ class QMMMSystem:
         
         if self.rep_method == "exch":
             # set up the repulsion
-            self.qm_system.setExchRepParameters(self.rep_info,self.mm_positions)
+            self.qm_system.setExchRepParameters(self.rep_info,self.mm_positions,pbc=self.pbc_dims)
         
         # set up a dictionary for decomposition of the energy terms
         energy_terms = {} 
         force_terms_mm = {}
         force_terms_qm = {}
         # get the MM energy
-        energy_terms["mm electrostatics"] = pol_resp["U_0"]
-        force_terms_mm["mm electrostatics"] = pol_resp["F_0_mm"]
-        force_terms_qm["mm electrostatics"] = pol_resp["F_0_qm"]
+        if self.int_method == "drf":
+            energy_terms["mm electrostatics"] = pol_resp["U_0"]
+            force_terms_mm["mm electrostatics"] = pol_resp["F_0_mm"]
+            force_terms_qm["mm electrostatics"] = pol_resp["F_0_qm"]
+        else:
+            energy_terms["mm electrostatics"],force_terms_mm["mm electrostatics"] = self.mm_system.getElectrostaticEnergyForces()
+            force_terms_qm["mm electrostatics"] = np.zeros(self.qm_positions.shape)
         start = timer()
         #E_mm,F_mm = self.mm_system.getEnergyForces(terms="remainder")
         E_mm,F_mm = self.mm_system.getEnergyForces()
-        energy_terms["mm remainder"] = E_mm - pol_resp["U_0"]
-        force_terms_mm["mm remainder"] = F_mm - pol_resp["F_0_mm"]
+        energy_terms["mm remainder"] = E_mm - energy_terms["mm electrostatics"]
+        force_terms_mm["mm remainder"] = F_mm - force_terms_mm["mm electrostatics"]
         end = timer()
         if self.print_info : print("MM energy time:",end-start,"s")
         # get the QM + interaction energy 
         # TODO - modify to deal with multiple energies from excited states possibly return a list of dictionaries, one for each state
         start = timer()
         qm_energy_terms = self.qm_system.getEnergy(return_terms=True)
-        
+        if self.print_info : print("QM energy time:",timer()-start,"s")
         if type(qm_energy_terms) is type([]):
             energy_terms = [{ **energy_terms, **state_energy_terms} for state_energy_terms in qm_energy_terms]
         else:
             energy_terms = { **energy_terms, **qm_energy_terms}
         
+        start1 = timer()
         force_terms_mm["QM+int"] = self.qm_system.getForcesMM()
-        
+        if self.print_info : print("MM QM/MM force time:",timer()-start1,"s")
+        start1 = timer()
         F_qm = self.qm_system.getForces(return_terms=True)
+        if self.print_info : print("QM QM/MM qm-force time:",timer()-start1,"s")
+        start1 = timer()
+        if self.mm_system.resp_mode_force == "linear":
+            q_0,qq_0 = self.qm_system.getMeanTotalMultipoles()
+            F_qm_c, F_mm_c = self.getClassicalIntForce(qq_0,q_0,pol_resp)
+            F_qm["QM+int"] += F_qm_c
+            force_terms_mm["QM+int"] += F_mm_c
+            F_qm_c_0 = F_qm_c+0.
+            F_mm_c_0 = F_mm_c+0.
+            self.qm_system.F_int += F_qm_c_0
+        
+        if self.print_info : print("QM QM/MM classical-force time:",timer()-start1,"s")
+        
+        
 
         if type(F_qm) is type([]):
             force_terms_qm = [{ **force_terms_qm, **F_n_qm} for F_n_qm in F_qm]
@@ -190,9 +219,31 @@ class QMMMSystem:
             force_terms_qm = { **force_terms_qm, **F_qm}
         end = timer()
         
-        
-        
         if self.print_info : print("QM energy/force time:",end-start,"s")
+        
+        if self.qm_system.resp is not None:
+            f_resp_qm = np.zeros((len(self.resp_states),self.qm_positions.shape[0],3))
+            f_resp_mm = np.zeros((len(self.resp_states),self.mm_positions.shape[0],3))
+            for n,state in enumerate(self.resp_states):
+                start1 = timer()
+                f_resp_qm[n,:,:] = self.qm_system.getForcesRespQM(state=state)
+                if self.print_info : print("QM QM/MM resp force time:",timer()-start1,"s")
+                start1 = timer()
+                f_resp_mm[n,:,:] = self.qm_system.getForcesRespMM()
+                if self.print_info : print("MM QM/MM resp force time:",timer()-start1,"s")
+                
+                if self.mm_system.resp_mode_force == "linear":
+                    q,qq = self.qm_system.getMeanTotalMultipolesResp()
+                    q+=q_0
+                    qq+=qq_0
+                    F_qm_c, F_mm_c = self.getClassicalIntForce(qq,q,pol_resp)
+                    f_resp_qm[n,:,:] += F_qm_c-F_qm_c_0 #+ force_terms_qm["QM+int"] -  F_qm_c_0
+                    f_resp_mm[n,:,:] += F_mm_c-F_mm_c_0 #- force_terms_mm["QM+int"] # + force_terms_mm["QM+int"] #+ F_mm_c_0
+                    
+                self.qm_system.resetRespForce()
+        
+        
+        
         
         # return the energy
         if return_terms:
@@ -202,6 +253,11 @@ class QMMMSystem:
             f_tot_mm = np.sum([force_terms_mm[k] for k in list(force_terms_mm.keys())],axis=0)
             if type(energy_terms) is not type([]):
                 return np.sum(np.array([energy_terms[k] for k in list(energy_terms.keys())])), f_tot_qm, f_tot_mm
+            if self.qm_system.resp is not None:
+                f_resp_qm += f_tot_qm[None,:,:] - force_terms_qm["QM+int"]
+                f_resp_mm += f_tot_mm[None,:,:] 
+                
+                return np.array([np.sum(np.array([state_energy_terms[k] for k in list(state_energy_terms.keys())])) for state_energy_terms in energy_terms]), f_tot_qm, f_tot_mm , f_resp_qm, f_resp_mm
             
     
     def setupExchRep(self,atom_type_info,mm_types,cutoff=12.0,setup_info=None):
@@ -307,3 +363,43 @@ class QMMMSystem:
             atoms = [a.index for a in res.atoms()]
             residue_groups.append(atoms)
         return residue_groups
+    
+    def getClassicalIntForce(self,qq,q,pol_resp):
+        '''
+        This returns the classical portion DRF interaction force
+        qq is the symmetrised <q_a q_b> matrix and q is <q_a> for the QM region
+        '''
+        
+        # ensure that qq is symmetric
+        qq = 0.5*(qq+qq.T)
+        # get the eigenvalues and eigenvectors
+        wq,vq = np.linalg.eigh(qq)
+        # empty force vectors
+        N_QM = self.qm_positions.shape[0]
+        N_MM = self.mm_positions.shape[0]
+        F_qm = np.zeros(self.qm_positions.shape)
+        F_mm = np.zeros(self.mm_positions.shape)
+        
+        # for each eigenvector get the corresponding forces and add to the total force
+        for n in range(0,len(wq)):
+            if np.abs(wq[n])>1.0e-12:
+                charges = vq[0:N_QM,n]
+                if self.multipole_order>0:
+                    dipoles = (vq[N_QM:(4*N_QM),n].reshape((3,N_QM))).T
+                else:
+                    dipoles = None
+                F_qm_n, F_mm_n = self.mm_system.getProbeForces(self.qm_positions,charges,probe_dipoles=dipoles)
+                F_qm += wq[n] * F_qm_n
+                F_mm += wq[n] * F_mm_n
+        
+        # add correction for the linear terms
+        q_corr = q - np.einsum('n,an->a',wq,vq)
+        F_qm += np.einsum('kxa,a->kx',pol_resp["F_1_qm"],q_corr)
+        F_mm += np.einsum('kxa,a->kx',pol_resp["F_1_mm"],q_corr)
+        
+        # add correction for the zero order term
+        sum_wq = np.sum(wq)
+        F_qm += (-sum_wq) * pol_resp["F_0_qm"]
+        F_mm += (-sum_wq) * pol_resp["F_0_mm"]
+        
+        return F_qm, F_mm

@@ -136,6 +136,9 @@ print("Numerical forces")
 R_vals_num = R_vals[2:-2]
 for f in forces_num:
     print(f[2:-2])    
+print("Analytical forces") 
+for f in forces_an:
+    print(f[2:-2])   
 # plot energies 
 axes = {0:"x",1:"y",2:"z"}
 for x in range(0,3):

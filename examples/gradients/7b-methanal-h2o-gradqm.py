@@ -25,9 +25,9 @@ import matplotlib.pyplot as plt
 
 
 # set up the Pyscf QM system u
-mol = gto.M(atom="7-inputs/methanal.xyz",unit="Angstrom",basis="pc-0",charge=0)
+mol = gto.M(atom="7-inputs/methanal.xyz",unit="Angstrom",basis="6-31G",charge=0)
 # The DFT method is chosen to be a long-range-corrected functional with density fitting
-mf = dft.RKS(mol)
+mf = dft.UKS(mol)
 mf.xc = "HF"
 #mf = mf.density_fit(auxbasis="weigendjkfit")
 
@@ -62,8 +62,9 @@ qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole
 qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info=None)
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
 
-qmmm_system.mm_system.use_prelim_mpole = True # set to true to use pre-limit form of dipoles in the energy expansion
+qmmm_system.mm_system.use_prelim_mpole = False # set to true to use pre-limit form of dipoles in the energy expansion
 qmmm_system.mm_system.prelim_dr = 5.0e-3 # default value is 1.0e-2
+qmmm_system.mm_system.resp_mode_force = "linear"
 
 # get positions for the QM and MM atoms
 mm_positions_ref = simulation.context.getState(getPositions=True).getPositions(asNumpy=True)._value

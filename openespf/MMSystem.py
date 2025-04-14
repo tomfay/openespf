@@ -19,10 +19,10 @@ class MMSystem:
         self.damp_default = 0.0
         self.qm_thole = None
         self.qm_damp = None
-        self.test_dipole = 1.0e0
+        self.test_dipole = 1.0e-1
         self.test_charge = 1.0e0
         self.print_info = False
-        self.induced_dipole_error = 1.0e-5
+        self.induced_dipole_error = 1.0e-6
         self.max_iter_induced = 100
         self.resp_mode = "linear"
         self.use_prelim_mpole = False # use prelimit form of multipoles
@@ -982,34 +982,80 @@ class MMSystem:
         
         return pol_resp
     
+    def getElectrostaticEnergy(self,units_out="AU"):
+        
+        U_0 = self.getRefMultipoleEnergy()._value
+        
+        # collect everything together into a dictionary and convert units as needed
+        if units_out == "OpenMM":
+            pol_resp = {"U_0":U_0,"U_1":U_1,"U_2":U_2,"units":units_out} 
+        elif units_out in ["AU","au"]:
+            Eh = 2625.4996352210997 # hartree in kJ/mol
+            a0 = 0.52917721092e-1 # bohr in nm
+            U_0 = U_0 / Eh
+            
+            
+        return U_0
+    
+    def getElectrostaticEnergyForces(self,units_out="AU"):
+        
+        U_0,F = self.getRefMultipoleEnergyForces()
+        N_MM = self.system.getNumParticles()
+        F = F[0:N_MM]
+        
+        # collect everything together into a dictionary and convert units as needed
+        if units_out == "OpenMM":
+            pol_resp = {"U_0":U_0,"U_1":U_1,"U_2":U_2,"units":units_out} 
+        elif units_out in ["AU","au"]:
+            Eh = 2625.4996352210997 # hartree in kJ/mol
+            a0 = 0.52917721092e-1 # bohr in nm
+            Eh_per_a0 = Eh / a0
+            U_0 = U_0 / Eh
+            F = F / Eh_per_a0
+            
+            
+            
+        return U_0,F
+    
     def getPolarizationEnergyForceResp(self,qm_positions,multipole_order,position_units="Bohr",units_out="AU"):
         '''
         Gets a dictionary of the polarization energy response as a dictionary containing the U_n and info about the 
         units used. The assumed expansion form is
         U_pol = U_0 + sum_a q_a U_a + (1/2)sum_ab q_a q_b U_ab 
         '''
-        
+        if not hasattr(self,"resp_mode_force"):
+            self.resp_mode_force = "quadratic"
         # set positions
         self.setQMPositions(qm_positions,units_in=position_units)
         
         # get the expansion given the multipole order
         if multipole_order==0:
-            U_0,U_1,U_2,F_0_mm,F_0_qm,F_1_mm,F_1_qm,F_2_mm,F_2_qm = self.getTestParticleChargeMultipoleEnergyForcesExpansion()
+            if self.resp_mode_force == "quadratic":
+                U_0,U_1,U_2,F_0_mm,F_0_qm,F_1_mm,F_1_qm,F_2_mm,F_2_qm = self.getTestParticleChargeMultipoleEnergyForcesExpansion()
+            elif self.resp_mode_force == "linear":
+                U_0,U_1,U_2,F_0_mm,F_0_qm,F_1_mm,F_1_qm = self.getChargePolarizationResponseLinearScaling(get_forces=True)
+                F_2_mm = F_2_qm = None
         elif multipole_order==1:
-            U_0,U_1,U_2,F_0_mm,F_0_qm,F_1_mm,F_1_qm,F_2_mm,F_2_qm = self.getTestParticleChargeDipoleMultipoleEnergyForcesExpansion()
+            if self.resp_mode_force == "quadratic":
+                U_0,U_1,U_2,F_0_mm,F_0_qm,F_1_mm,F_1_qm,F_2_mm,F_2_qm = self.getTestParticleChargeDipoleMultipoleEnergyForcesExpansion()
+            elif self.resp_mode_force == "linear":
+                U_0,U_1,U_2,F_0_mm,F_0_qm,F_1_mm,F_1_qm = self.getChargeDipolePolarizationResponseLinearScaling(get_forces=True)
+                F_2_mm = F_2_qm = None
         else:
             raise Exception("Multipole order currently must be 0 or 1. multipole_order =",multipole_order,"is not allowed.")
         
         
-        N_QM = F_2_qm.shape[2]
+        N_QM = F_1_qm.shape[1]
         
     
         
         # rearrange the force objects to N_atm x 3 x N_Q x N_Q
         F_1_mm = np.permute_dims(F_1_mm,axes=(1,2,0))
         F_1_qm = np.permute_dims(F_1_qm,axes=(1,2,0))
-        F_2_mm = np.permute_dims(F_2_mm,axes=(2,3,0,1))
-        F_2_qm = np.permute_dims(F_2_qm,axes=(2,3,0,1))
+        if F_2_mm is not None:
+            F_2_mm = np.permute_dims(F_2_mm,axes=(2,3,0,1))
+        if F_2_qm is not None:
+            F_2_qm = np.permute_dims(F_2_qm,axes=(2,3,0,1))
         
         # collect everything together into a dictionary and convert units as needed
         if units_out in ["AU","au"]:
@@ -1028,8 +1074,10 @@ class MMSystem:
             F_0_qm = F_0_qm / Eh_per_a0
             F_1_mm = conv.reshape((1,1,N_Q))*F_1_mm /Eh_per_a0
             F_1_qm = conv.reshape((1,1,N_Q))*F_1_qm /Eh_per_a0
-            F_2_mm = (np.outer(conv,conv)).reshape((1,1,N_Q,N_Q))*F_2_mm/Eh_per_a0
-            F_2_qm = (np.outer(conv,conv)).reshape((1,1,N_Q,N_Q))*F_2_qm/Eh_per_a0
+            if F_2_mm is not None:
+                F_2_mm = (np.outer(conv,conv)).reshape((1,1,N_Q,N_Q))*F_2_mm/Eh_per_a0
+            if F_2_qm is not None:
+                F_2_qm = (np.outer(conv,conv)).reshape((1,1,N_Q,N_Q))*F_2_qm/Eh_per_a0
         
         
         
@@ -1129,7 +1177,7 @@ class MMSystem:
                 self.multipole_force_dir.setPolarizationType(self.multipole_force_dir.Direct)
                 self.multipole_force_dir.setNonbondedMethod(force.getNonbondedMethod())
                 if force.getNonbondedMethod() == force.PME:
-                    print("Setting PME parameters")
+                    #print("Setting PME parameters")
                     self.multipole_force_dir.setPMEParameters(*self.multipole_force.getPMEParametersInContext(self.multipole_simulation.context))
                     self.multipole_force_dir.setCutoffDistance(force.getCutoffDistance())
         
@@ -1300,14 +1348,163 @@ class MMSystem:
             platform = simulation.platform
         except:
             platform = None
-        print(self.multipole_system_pol.getNumParticles())
-        print(self.multipole_force_pol.getNumMultipoles())
+        #print(self.multipole_system_pol.getNumParticles())
+        #print(self.multipole_force_pol.getNumMultipoles())
         self.multipole_simulation_pol = app.Simulation(self.multipole_topology_pol,self.multipole_system_pol,integrator,
                                               platform)
         
         return
     
-    def getChargePolarizationResponseLinearScaling(self):
+    def createProbeSimulation(self,N_probes):
+        # create a new system object with the test charges/dipoles
+        self.multipole_force_probe = AmoebaMultipoleForce()
+        for force in self.system.getForces():
+            if force.getName() == "AmoebaMultipoleForce":
+                self.multipole_force_probe = deepcopy(force)
+                self.multipole_force_probe.setNonbondedMethod(force.getNonbondedMethod())
+                if force.getNonbondedMethod() == force.PME:
+                    #print("Setting PME parameters")
+                    self.multipole_force_probe.setPMEParameters(*self.multipole_force.getPMEParametersInContext(self.multipole_simulation.context))
+                    self.multipole_force_probe.setCutoffDistance(force.getCutoffDistance())
+        
+        self.multipole_force_probe.setMutualInducedTargetEpsilon(self.induced_dipole_error)
+        self.multipole_force_probe.setMutualInducedMaxIterations(self.max_iter_induced)
+        # create a new system object for test charges/dipoles and delete all forces
+        self.multipole_system_probe = deepcopy(self.system)
+        if self.multipole_system_probe.usesPeriodicBoundaryConditions():
+            self.multipole_system_probe.setDefaultPeriodicBoxVectors(*self.multipole_system.getDefaultPeriodicBoxVectors())
+        for i in range(0,self.multipole_system_probe.getNumForces()):
+            self.multipole_system_probe.removeForce(0)
+        
+        N_MM = self.multipole_force_probe.getNumMultipoles()
+        # add N_probes probe particles and N_probes reference particles for defining the probe particle dipole moments
+        c = 0.0
+        d = [0.]*3
+        q = [0.]*9
+        axis_type = self.multipole_force_probe.NoAxisType
+        kx = ky = -1
+        kz = -1
+        pol = 0.0
+        thole = self.thole_default
+        damp = self.damp_default
+        # first add the reference particles
+        for i in range(0,N_probes):
+            # add the particle to the force object
+            self.multipole_force_probe.addMultipole(c,d,q,axis_type,kz,kx,ky,thole,damp,pol)
+            # add the particle to the system as well
+            self.multipole_system_probe.addParticle(0.0)
+        # second add the "real" probe particles
+        axis_type = self.multipole_force_probe.ZOnly
+        for i in range(0,N_probes):
+            thole = self.qm_thole[i]
+            damp = self.qm_damp[i]
+            kz = N_MM + i
+            # add the particle to the force object
+            self.multipole_force_probe.addMultipole(c,d,q,axis_type,kz,kx,ky,thole,damp,pol)
+            # add the particle to the system as well
+            self.multipole_system_probe.addParticle(0.0)
+        
+        # update the covalent maps for each test particle to remove nans
+        for i in range(0,2*N_probes):
+            self.multipole_force_probe.setCovalentMap(N_MM+i,self.multipole_force_probe.Covalent12,[N_MM+j for j in range(0,2*N_probes) if not j==i])
+            self.multipole_force_probe.setCovalentMap(N_MM+i,self.multipole_force_probe.PolarizationCovalent11,[N_MM+j for j in range(0,2*N_probes) if not j==i])
+        
+        # add the new multipole force to the system
+        self.multipole_system_probe.addForce(self.multipole_force_probe)
+        
+        # get the extended system topology and add the test particles
+        self.multipole_topology_probe = deepcopy(self.simulation.topology)
+        test_chain = self.multipole_topology_probe.addChain()
+        test_res = self.multipole_topology_probe.addResidue("PRB",test_chain)
+        for i in range(0,2*N_probes):
+            self.multipole_topology_probe.addAtom(str(i+1),app.Element.getByAtomicNumber(2),test_res)
+        atoms = [a for a in self.multipole_topology_probe.atoms()]
+        for i in range(0,2*N_probes):
+            for j in range(0,2*N_probes):
+                if not i==j:
+                    self.multipole_topology_probe.addBond(atoms[i+N_MM],atoms[j+N_MM])
+        # set up the new Simulation object for the multipole force
+        integrator = VerletIntegrator(1e-16)
+        try:
+            platform = self.simulation.platform
+        except:
+            platform = None
+        
+        self.multipole_simulation_probe = app.Simulation(self.multipole_topology_probe,self.multipole_system_probe,integrator,
+                                              platform)
+        
+        
+        return
+
+    def setProbeForcePositionsAndMultipoles(self,positions,charges,dipoles=None):
+        '''
+        Sets probe force 
+        positions is assumed to be in openmm format
+        '''
+        N_probes = len(charges)
+        N_MM = self.system.getNumParticles()
+        positions_ref = deepcopy(positions)
+        dx = 1.0e-4
+        
+        for i in range(0,N_probes):
+            c = charges[i]
+            
+            if dipoles is not None:
+                mod_d = np.linalg.norm(np.array(dipoles[i]))
+                if mod_d>1.0e-10:
+                    d = [0.,0.,mod_d]
+                else:
+                    d = [0.]*3
+            else:
+                d = [0.]*3
+            kx = ky = -1
+            q = [0.]*9
+            pol = 0.
+            kz = N_MM + i
+            axis_type = self.multipole_force_probe.ZOnly
+            thole = self.qm_thole[i]
+            damp = self.qm_damp[i]
+            self.multipole_force_probe.setMultipoleParameters(N_MM+N_probes+i,c,d,q,axis_type,kz,kx,ky,thole,damp,pol)
+            if dipoles is not None and mod_d>1.0e-10:
+                d_i = dipoles[i]
+                positions_ref[i] = positions_ref[i] + ((dx/d[2])*Vec3(d_i[0],d_i[1],d_i[2])) * positions_ref[i].unit
+            else:
+                positions_ref[i] = positions_ref[i] + (Vec3(1.,0.,0.)*dx) * positions_ref[i].unit
+        
+        self.multipole_force_probe.updateParametersInContext(self.multipole_simulation_probe.context)
+        self.multipole_simulation_probe.context.setPositions(self.positions+positions_ref+positions)
+        return
+    
+    def getProbeForces(self,probe_positions,probe_charges,probe_dipoles=None):
+        '''
+        Gets forces on full set of probe particles.
+        Units in are assumed to be atomic units in numpy arrays
+        '''
+        # first convert to lists and Vec3
+        N_probes = probe_positions.shape[0]
+        probe_positions =  BOHR_TO_NM * probe_positions
+        probe_positions = [Vec3(probe_positions[i,0],probe_positions[i,1],probe_positions[i,2]) for i in range(0,N_probes)] * unit.nanometer
+        probe_charges = list(probe_charges)
+        if probe_dipoles is not None:
+            probe_dipoles = probe_dipoles *  BOHR_TO_NM
+            probe_dipoles = [[probe_dipoles[i,0],probe_dipoles[i,1],probe_dipoles[i,2]] for i in range(0,N_probes)]
+        
+        if not hasattr(self,"multipole_simulation_probe"):
+            self.createProbeSimulation(N_probes)
+        
+        self.setProbeForcePositionsAndMultipoles(probe_positions,probe_charges,dipoles=probe_dipoles)
+        
+        F = self.multipole_simulation_probe.context.getState(getForces=True).getForces(asNumpy=True)._value
+        N_MM = self.system.getNumParticles()
+        F_MM = F[0:N_MM,:] 
+        F_probe = F[N_MM:(N_MM+N_probes),:] + F[(N_MM+N_probes):(N_MM+2*N_probes),:]
+        
+        F_MM *= ( KJMOL_TO_HARTREE /  NM_TO_BOHR) 
+        F_probe *= ( KJMOL_TO_HARTREE /  NM_TO_BOHR) 
+        
+        return F_probe, F_MM
+    
+    def getChargePolarizationResponseLinearScaling(self,get_forces=False):
         '''
         Method for getting the polarization response expansion in a linear scaling way
         '''
@@ -1317,9 +1514,15 @@ class MMSystem:
         inc_pol=False
         N_MM = self.system.getNumParticles()
         N_QM = len(self.qm_positions)
+        N_Q = N_QM
         c = self.test_charge
-        
-        U_MM = self.getRefMultipoleEnergy()._value
+        if not get_forces:
+            U_MM = self.getRefMultipoleEnergy()._value
+        else:
+            U_MM,F = self.getRefMultipoleEnergyForces()
+            F_0_mm = F[0:N_MM,:]+0.
+            F_0_qm = np.zeros((N_QM,3))
+            
         self.setTestParticleCharge([0.0,0.0,0.0,0.0],[0,1,2,3],inc_dir=True,inc_pol=inc_pol)
         self.setProbePositions(self.positions,inc_dir=True,inc_pol=inc_pol)
         mu_MM = np.array(self.multipole_force.getInducedDipoles(self.multipole_simulation.context))[0:N_MM,:]
@@ -1332,6 +1535,11 @@ class MMSystem:
         U_minus = np.zeros((N_QM,))
         mu_QM = np.zeros((N_QM,N_MM,3))
         f_QM = np.zeros((N_QM,N_MM,3))
+        if get_forces:
+            F_plus_qm = np.zeros((N_Q,N_QM,3))
+            F_plus_mm = np.zeros((N_Q,N_MM,3))
+            F_minus_qm = np.zeros((N_Q,N_QM,3))
+            F_minus_mm = np.zeros((N_Q,N_MM,3))
         
         # get energies of system with a test particle energy of +c
         start = timer()
@@ -1340,12 +1548,22 @@ class MMSystem:
             self.setTestParticleCharge(c,0,thole=self.qm_thole[A],damp=self.qm_damp[A],inc_dir=True,inc_pol=inc_pol)
             test_positions = ([self.qm_positions[A]._value]+[self.qm_positions[A]._value+Vec3(1e-3*i,0,0) for i in range(1,4)])*unit.nanometer
             self.setProbePositions(self.positions,test_positions=test_positions,inc_dir=True,inc_pol=inc_pol)
-            U_plus[A] = self.getMultipoleEnergy()._value
+            if not get_forces:
+                U_plus[A] = self.getMultipoleEnergy()._value
+            if get_forces:
+                U_plus[A],F = self.getMultipoleEnergyForces()
+                F_plus_qm[A,A,:] = F[N_MM,:]+0.
+                F_plus_mm[A,0:N_MM,:] = F[0:N_MM,:]+0.
             mu_QM[A,:,:] = np.array(self.multipole_force.getInducedDipoles(self.multipole_simulation.context))[0:N_MM,:]-mu_MM
             #mu_QM[A,:,:] = np.array(self.multipole_force_pol.getInducedDipoles(self.multipole_simulation_pol.context))[0:N_MM,:] - mu_MM
             f_QM[A,:,:] = self.alpha_MM_inv[:,None] * np.array(self.multipole_force_dir.getInducedDipoles(self.multipole_simulation_dir.context))[0:N_MM,:]-f_MM
             self.setTestParticleCharge(-c,0,thole=self.qm_thole[A],damp=self.qm_damp[A],inc_dir=True,inc_pol=inc_pol)
-            U_minus[A] = self.getMultipoleEnergy()._value
+            if not get_forces:
+                U_minus[A] = self.getMultipoleEnergy()._value
+            if get_forces:
+                U_minus[A],F = self.getMultipoleEnergyForces()
+                F_minus_qm[A,A,:] = F[N_MM,:]+0.
+                F_minus_mm[A,0:N_MM,:] = F[0:N_MM,:]+0.
             
         # get energies of system with a test particle energy of -c
         #self.setTestParticleCharge(-c,0)
@@ -1364,25 +1582,37 @@ class MMSystem:
         #print(U_2)
         
         U_1 = 0.5*(U_plus - U_minus)/c
+        if get_forces:
+            F_1_mm = (F_plus_mm - F_minus_mm) * (0.5/c)
+            F_1_qm = (F_plus_qm - F_minus_qm) * (0.5/c)
         
         if self.multipole_force.usesPeriodicBoundaryConditions():
             U_self = self.getSelfInteractionEnergy(multipole_order=0)
             U_2 += U_self
-
-        return U_MM,U_1,U_2
+        if not get_forces:
+            return U_MM,U_1,U_2
+        else:
+            return U_MM,U_1,U_2,F_0_mm,F_0_qm,F_1_mm,F_1_qm
     
-    def getChargeDipolePolarizationResponseLinearScaling(self):
+    def getChargeDipolePolarizationResponseLinearScaling(self,get_forces=False):
         '''
         Method for getting the polarization response expansion in a linear scaling way
+        if get_forces is True then the forces for the zeroth and first order terms are also returned
         '''
         self.createDirectPolSimulation()
         #self.createPolSimulation()
         inc_pol = False
         N_MM = self.system.getNumParticles()
         N_QM = len(self.qm_positions)
+        N_Q = 4 * N_QM
         c = self.test_charge
         
-        U_MM = self.getRefMultipoleEnergy()._value
+        if not get_forces:
+            U_MM = self.getRefMultipoleEnergy()._value
+        else:
+            U_MM,F = self.getRefMultipoleEnergyForces()
+            F_0_mm = F[0:N_MM,:]+0.
+            F_0_qm = np.zeros((N_QM,3))
         self.setTestParticleCharge([0.0,0.0,0.0,0.0],[0,1,2,3],inc_dir=True,inc_pol=inc_pol)
         self.setProbePositions(self.positions,inc_dir=True,inc_pol=inc_pol)
         #mu_MM = np.array(self.multipole_force_pol.getInducedDipoles(self.multipole_simulation_pol.context))[0:N_MM,:]
@@ -1393,21 +1623,40 @@ class MMSystem:
         U_diag = np.zeros((4*N_QM,))
         mu_QM = np.zeros((4*N_QM,N_MM,3))
         f_QM = np.zeros((4*N_QM,N_MM,3))
+        if get_forces:
+            F_plus_qm = np.zeros((N_Q,N_QM,3))
+            F_plus_mm = np.zeros((N_Q,N_MM,3))
+            F_minus_qm = np.zeros((N_Q,N_QM,3))
+            F_minus_mm = np.zeros((N_Q,N_MM,3))
         
         # get energies of system with a test particle energy of +c
         start = timer()
 
         for A in range(0,N_QM):
+            
             self.setTestParticleCharge(c,0,thole=self.qm_thole[A],damp=self.qm_damp[A],inc_dir=True,inc_pol=inc_pol)
             test_positions = ([self.qm_positions[A]._value]+[self.qm_positions[A]._value+Vec3(1e-3*i,0,0) for i in range(1,4)])*unit.nanometer
             self.setProbePositions(self.positions,test_positions=test_positions,inc_dir=True,inc_pol=inc_pol)
-            U_plus[A] = self.getMultipoleEnergy()._value
+            
+            
+            if not get_forces:
+                U_plus[A] = self.getMultipoleEnergy()._value
+            if get_forces:
+                U_plus[A],F = self.getMultipoleEnergyForces()
+                F_plus_qm[A,A,:] = F[N_MM,:]+0.
+                F_plus_mm[A,0:N_MM,:] = F[0:N_MM,:]+0.
             #mu_QM[A,:,:] = (np.array(self.multipole_force_pol.getInducedDipoles(self.multipole_simulation_pol.context))[0:N_MM,:]-mu_MM)/c
+            
             mu_QM[A,:,:] = (np.array(self.multipole_force.getInducedDipoles(self.multipole_simulation.context))[0:N_MM,:]-mu_MM)/c
             
             f_QM[A,:,:] = (self.alpha_MM_inv[:,None] * np.array(self.multipole_force_dir.getInducedDipoles(self.multipole_simulation_dir.context))[0:N_MM,:]-f_MM)/c
             self.setTestParticleCharge(-c,0,thole=self.qm_thole[A],damp=self.qm_damp[A],inc_dir=True,inc_pol=inc_pol)
-            U_minus[A] = self.getMultipoleEnergy()._value
+            if not get_forces:
+                U_minus[A] = self.getMultipoleEnergy()._value
+            if get_forces:
+                U_minus[A],F = self.getMultipoleEnergyForces()
+                F_minus_qm[A,A,:] = F[N_MM,:]+0.
+                F_minus_mm[A,0:N_MM,:] = F[0:N_MM,:]+0.
             
         n_alphas = [Vec3(1,0,0),Vec3(0,1,0),Vec3(0,0,1)]
         d_0 = self.test_dipole
@@ -1418,14 +1667,24 @@ class MMSystem:
                 self.setTestParticleChargeDipole(0.0,[0,0,+d_0],[N_MM+1,-1,-1],0,thole=self.qm_thole[A],damp=self.qm_damp[A],inc_dir=True,inc_pol=inc_pol)
                 test_positions = ([self.qm_positions[A]._value,self.qm_positions[A]._value+n_alpha*1e-2]+[self.qm_positions[A]._value+Vec3(1e-5*i,0,0) for i in range(2,4)])*unit.nanometer
                 self.setProbePositions(self.positions,test_positions=test_positions,inc_dir=True,inc_pol=inc_pol)
-                U_plus[alphaA] = self.getMultipoleEnergy()._value
+                if not get_forces:
+                    U_plus[alphaA] = self.getMultipoleEnergy()._value
+                if get_forces:
+                    U_plus[alphaA],F = self.getMultipoleEnergyForces()
+                    F_plus_qm[alphaA,A,:] = F[N_MM,:]+F[N_MM+1,:]
+                    F_plus_mm[alphaA,0:N_MM,:] = F[0:N_MM,:]+0.
                 #mu_QM[alphaA,:,:] = (np.array(self.multipole_force_pol.getInducedDipoles(self.multipole_simulation_pol.context))[0:N_MM,:]-mu_MM)/d_0
                 mu_QM[alphaA,:,:] = (np.array(self.multipole_force.getInducedDipoles(self.multipole_simulation.context))[0:N_MM,:]-mu_MM)/d_0
             
                 f_QM[alphaA,:,:] = (self.alpha_MM_inv[:,None] * np.array(self.multipole_force_dir.getInducedDipoles(self.multipole_simulation_dir.context))[0:N_MM,:]-f_MM)/d_0
                 self.setTestParticleChargeDipole(0.0,[0,0,-d_0],[N_MM+1,-1,-1],0,thole=self.qm_thole[A],damp=self.qm_damp[A],inc_dir=True,inc_pol=inc_pol)
                 
-                U_minus[alphaA] = self.getMultipoleEnergy()._value
+                if not get_forces:
+                    U_minus[alphaA] = self.getMultipoleEnergy()._value
+                if get_forces:
+                    U_minus[alphaA],F = self.getMultipoleEnergyForces()
+                    F_minus_qm[alphaA,A,:] = F[N_MM,:]+F[N_MM+1,:]
+                    F_minus_mm[alphaA,0:N_MM,:] = F[0:N_MM,:]+0.
         
         U_2 = -np.einsum('Akx,Bkx->AB',mu_QM,f_QM)
         U_2 = 0.5*(U_2+U_2.T)
@@ -1439,15 +1698,24 @@ class MMSystem:
         
         U_1[0:N_QM] = 0.5*(U_plus[0:N_QM] - U_minus[0:N_QM])/c
         U_1[N_QM:] = 0.5*(U_plus[N_QM:] - U_minus[N_QM:])/d_0
+        if get_forces:
+            F_1_qm = np.zeros((N_Q,N_QM,3))
+            F_1_mm = np.zeros((N_Q,N_MM,3))
+            F_1_mm[0:N_QM,:,:] = (F_plus_mm[0:N_QM,:,:] - F_minus_mm[0:N_QM,:,:]) * (0.5/c)
+            F_1_qm[0:N_QM,:,:] = (F_plus_qm[0:N_QM,:,:] - F_minus_qm[0:N_QM,:,:]) * (0.5/c)
+            F_1_mm[N_QM:,:,:] = (F_plus_mm[N_QM:,:,:] - F_minus_mm[N_QM:,:,:]) * (0.5/d_0)
+            F_1_qm[N_QM:,:,:] = (F_plus_qm[N_QM:,:,:] - F_minus_qm[N_QM:,:,:]) * (0.5/d_0)
         #U_1[0:N_QM] = (U_plus[0:N_QM] - U_MM - (0.5*c*c)*np.diag(U_2)[0:N_QM])/c
         #U_1[N_QM:] = (U_plus[N_QM:] - U_MM - (0.5*c*c)*np.diag(U_2)[N_QM:])/d_0
         
         if self.multipole_force.usesPeriodicBoundaryConditions():
             U_self = self.getSelfInteractionEnergy(multipole_order=1)
             U_2 += U_self
-
-        
-        return U_MM,U_1,U_2
+            
+        if not get_forces:
+            return U_MM,U_1,U_2
+        else:
+            return U_MM,U_1,U_2,F_0_mm,F_0_qm,F_1_mm,F_1_qm
     
     def createSelfIntSimulation(self):
         self.multipole_force_self = AmoebaMultipoleForce()
@@ -1515,6 +1783,7 @@ class MMSystem:
         #print("PME params:",self.multipole_force_self.getPMEParametersInContext(self.multipole_simulation_self.context))
         #print("cutoff:",self.multipole_force_self.getCutoffDistance())
         return
+    
     
     def setTestParticleChargeDipoleSelf(self,c,d,k,ind,thole=None,damp=None):
         if not type(c) == type([]):
