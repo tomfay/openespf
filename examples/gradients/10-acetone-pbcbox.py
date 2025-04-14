@@ -66,7 +66,7 @@ resp.singlet = True
 
 
 # information about the QM-MM interaction
-multipole_order = 0 # 0=charges, 1=charges+dipoles for QM ESPF multipole operators
+multipole_order = 1 # 0=charges, 1=charges+dipoles for QM ESPF multipole operators
 multipole_method = "espf" # "espf" or "mulliken" type multipole operators
 # information for the exchange-repulsion model (atomic units)
 rep_type_info = [{"N_eff":4.0+0.669,"R_dens":1.71*Data.ANGSTROM_TO_BOHR,"rho(R_dens)":1.0e-3},
@@ -160,5 +160,6 @@ start = timer()
 E_qmmm_lin,F_qm_lin,F_mm_lin,F_qm_resp_lin,F_mm_resp_lin = qmmm_system.getEnergyForces()
 #E_qmmm_lin,F_qm_lin,F_mm_lin = qmmm_system.getEnergyForces()
 print("Linear calculation time:", timer()-start, "s")
+print("E(QM/MM) (linear) = ", E_qmmm)
 
 

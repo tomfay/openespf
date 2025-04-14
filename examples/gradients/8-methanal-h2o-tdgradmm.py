@@ -200,7 +200,7 @@ axes = {0:"x",1:"y",2:"z"}
 for x in range(0,3):
     plt.plot(R_vals*1.0e1,(energies[x,:]-E_qmmm_0)*1e3,label="Energies along "+axes[x])
 plt.xlabel("Separation [Angstrom]")
-plt.ylabel("Energy [mH]")
+plt.ylabel("Ground state energy [mH]")
 plt.legend()
 plt.show()
     
@@ -210,7 +210,7 @@ for x in range(0,3):
     plt.plot(R_vals_num*1.0e1,(forces_num[x][2:-2])*1e3,label="Numerical "+axes[x])
     plt.plot(R_vals*1.0e1,(forces_an[x])*1e3,'--',label="Analytical "+axes[x])
 plt.xlabel("Separation [Angstrom]")
-plt.ylabel("Force [mH/bohr]")
+plt.ylabel("Ground state force [mH/bohr]")
 plt.legend()
 
 plt.show()
@@ -220,7 +220,7 @@ axes = {0:"x",1:"y",2:"z"}
 for x in range(0,3):
     plt.plot(R_vals*1.0e1,(energies_resp[x,:]-E_qmmm_0)*1e3,label="Energies along "+axes[x])
 plt.xlabel("Separation [Angstrom]")
-plt.ylabel("Energy [mH]")
+plt.ylabel("TDDFT Energy [mH]")
 plt.legend()
 plt.show()
     
@@ -231,7 +231,7 @@ for x in range(0,3):
     plt.plot(R_vals*1.0e1,(forces_resp_an[x])*1e3,'--',label="Analytical "+axes[x])
     #plt.plot(R_vals*1.0e1,(forces_an[x])*1e3,':',label="Analytical S0"+axes[x])
 plt.xlabel("Separation [Angstrom]")
-plt.ylabel("Force [mH/bohr]")
+plt.ylabel("TDDFT Force [mH/bohr]")
 plt.legend()
 
 plt.show()
