@@ -21,11 +21,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-# set up the Pyscf QM system u
+# set up the Pyscf QM system 
 mol = gto.M(atom="3-inputs/acrolein.xyz",unit="Angstrom",basis="def2-SVP",charge=0)
 # The DFT method is chosen to be a long-range-corrected functional with density fitting
 mf = dft.RKS(mol)
-mf.xc = "HYB_GGA_XC_WB97X_D3"
+mf.xc = "HYB_GGA_XC_LRC_WPBEH"
 mf = mf.density_fit(auxbasis="weigendjkfit")
 
 
@@ -33,9 +33,9 @@ mf = mf.density_fit(auxbasis="weigendjkfit")
 pdb = PDBFile("3-inputs/h2o.pdb")
 topology = pdb.getTopology() 
 positions = pdb.getPositions()
-forcefield = ForceField("3-inputs/h2o.xml")
+forcefield = ForceField("amoeba2018.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
-platform = Platform.getPlatformByName("OpenCL")
+platform = Platform.getPlatformByName("Reference")
 integrator = VerletIntegrator(1e-16*picoseconds)
 simulation = Simulation(topology, system, integrator,platform)
 simulation.context.setPositions(positions)
@@ -58,6 +58,7 @@ qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole
 # set additional parameters for the exchange repulsion + damping of electrostatics
 qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info=None)
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
+qmmm_system.mm_system.use_prelim_mpole = True
 
 # get positions for the QM and MM atoms
 mm_positions_ref = simulation.context.getState(getPositions=True).getPositions(asNumpy=True)._value
@@ -96,6 +97,10 @@ for n,R in enumerate(R_vals):
     # save enegy
     energies[n] =  E_qmmm + 0
 
+
+print("Interaction energies [Hartree]:")
+print(energies-E_qmmm_0)
+#np.savetxt("./3-inputs/int-energies-prelim.dat",np.vstack((R_vals,energies-E_qmmm_0)).T,delimiter=',',header='Separation [Bohr],Interaction energy [Hartree]')
 
 # plot energies 
 plt.plot(R_vals*1.0e1,(energies-E_qmmm_0)*1e3,label="QM/MM ESPF-DRF")

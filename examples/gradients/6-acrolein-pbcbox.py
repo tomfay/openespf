@@ -29,10 +29,10 @@ modeller.delete([r for r in modeller.topology.residues() if r.name == "UNL"])
 positions = modeller.getPositions()
 topology = modeller.getTopology()
 positions = modeller.getPositions()
-forcefield = ForceField("6-inputs/h2o.xml")
+forcefield = ForceField("amoeba2018.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=PME,nonbondedCutoff=1.0*nanometer)
 #system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
-platform = Platform.getPlatformByName("OpenCL")
+platform = Platform.getPlatformByName("Reference")
 integrator = VerletIntegrator(1e-16*picoseconds)
 simulation = Simulation(topology, system, integrator,platform)
 simulation.context.setPositions(positions)
@@ -43,16 +43,17 @@ modeller.delete([r for r in modeller.topology.residues() if r.name == "HOH"])
 residue = [r for r in modeller.topology.residues()][0]
 qm_positions = np.array(modeller.getPositions()._value) * 10. # in Angstrom
 atom =  [[atom.element.symbol , qm_positions[n,:]] for n,atom in enumerate(residue.atoms())] 
-mol = gto.M(atom=atom,unit="Angstrom",basis="6-31G**",charge=0,verbose=2)
+mol = gto.M(atom=atom,unit="Angstrom",basis="6-31G",charge=0,verbose=2)
 # The DFT method is chosen to be ωB97X-D3/def2-SVP
 #mf = dft.RKS(mol)
 #mf.xc = "HF"
 #mf = mf.density_fit()
 mf = scf.RHF(mol)
+mf.conv_tol = 1.0e-12
 
 
 # information about the QM-MM interaction
-multipole_order = 1 # 0=charges, 1=charges+dipoles for QM ESPF multipole operators
+multipole_order = 0 # 0=charges, 1=charges+dipoles for QM ESPF multipole operators
 multipole_method = "espf" # "espf" or "mulliken" type multipole operators
 # information for the exchange-repulsion model (atomic units)
 rep_type_info = [{"N_eff":4.0+0.669,"R_dens":1.71*Data.ANGSTROM_TO_BOHR,"rho(R_dens)":1.0e-3},
@@ -69,6 +70,7 @@ qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole
 # set additional parameters for the exchange repulsion + damping of electrostatics
 qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info=None)
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
+qmmm_system.mm_system.damp_perm = True
 
 # get positions for the QM and MM atoms
 mm_positions = simulation.context.getState(getPositions=True).getPositions(asNumpy=True)._value
@@ -92,42 +94,19 @@ dm = mf.make_rdm1()
 #dm = None
 # set as initial guess for QM/MM calculation (not required!)
 qmmm_system.qm_system.dm_guess = dm
+qmmm_system.mm_system.resp_mode_force = "linear"
+start = timer()
+if qmmm_system.qm_system.resp is not None:
+    E_qmmm_lin,F_qm_lin,F_mm_lin,F_qm_resp_lin,F_mm_resp_lin = qmmm_system.getEnergyForces()
+else:
+    E_qmmm_lin,F_qm_lin,F_mm_lin= qmmm_system.getEnergyForces()
+    #cProfile.run('E_qmmm_lin,F_qm_lin,F_mm_lin= qmmm_system.getEnergyForces()')
+#E_qmmm_lin,F_qm_lin,F_mm_lin = qmmm_system.getEnergyForces()
+print("Linear calculation time:", timer()-start, "s")
 
 # Do the QM/MM calculation
-#E_qmmm_terms = qmmm_system.getEnergy(return_terms=True)
-# Unlike in previosu examples, the above gives a breakdown of some of the terms in the QM/MM Energy
-#print("E(QM/MM) terms = ", E_qmmm_terms)
-#E_qmmm = np.sum(np.array([E_qmmm_terms[k] for k in list(E_qmmm_terms.keys())]))
-#qmmm_system.mm_system.resp_mode = "quadratic"
-#E_qmmm,_,_ = qmmm_system.getEnergyForces()
-E_qmmm = qmmm_system.getEnergy()
-
-print("E(QM/MM) = ",E_qmmm)
-print("E(QM/MM) - E(QM) - E(MM) = ",E_qmmm - E_qmmm_0)
-
 # The dipole moment of the QM system can be accessed as follows, as expected it is polarised relative to the vacuum
 dipole_aq = qmmm_system.qm_system.mf_qmmm.dip_moment()
 print("Dipole magnitude (Aq) = " , np.linalg.norm(dipole_aq)," Debye")
 print("Magnitude of change in dipole moment = " , np.linalg.norm(dipole_aq-dipole_vac)," Debye")
-
-# Do the QM/MM calculation
-qmmm_system.print_info = True
-qmmm_system.qm_system.dm_guess = dm
-start = timer()
-E_qmmm,F_qm,F_mm = qmmm_system.getEnergyForces()
-print("Quadratic calculation time:", timer()-start, "s")
-print("E(QM/MM) (quadratic) = ", E_qmmm)
-# do the calcualtion with linear scaling forces
-qmmm_system.qm_system.dm_guess = dm
-qmmm_system.mm_system.resp_mode_force = "linear"
-start = timer()
-E_qmmm_lin,F_qm_lin,F_mm_lin = qmmm_system.getEnergyForces()
-print("Linear calculation time:", timer()-start, "s")
-
-print("E(QM/MM) (linear) = ", E_qmmm_lin)
-print("Quadratic-linear energy difference = ", E_qmmm-E_qmmm_lin)
-print("Quadratic-linear QM force difference = ")
-print(np.max(np.abs(F_qm-F_qm_lin)))
-print("Quadratic-linear MM force difference = ")
-print(np.max(np.abs(F_mm-F_mm_lin)))
 

@@ -29,7 +29,7 @@ topology = modeller.getTopology()
 positions = modeller.getPositions()
 forcefield = ForceField("4-inputs/h2o.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
-platform = Platform.getPlatformByName("CPU")
+platform = Platform.getPlatformByName("Reference")
 integrator = VerletIntegrator(1e-16*picoseconds)
 simulation = Simulation(topology, system, integrator,platform)
 simulation.context.setPositions(positions)
@@ -65,6 +65,7 @@ qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole
 # set additional parameters for the exchange repulsion + damping of electrostatics
 qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info=None)
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
+qmmm_system.mm_system.use_prelim_mpole = False
 
 # get positions for the QM and MM atoms
 mm_positions = simulation.context.getState(getPositions=True).getPositions(asNumpy=True)._value
@@ -90,6 +91,7 @@ qmmm_system.qm_system.dm_guess = dm
 E_qmmm = qmmm_system.getEnergy()
 print("E(QM/MM) = ",E_qmmm)
 print("E(QM/MM) - E(QM) - E(MM) = ",E_qmmm - E_qmmm_0)
+#np.savetxt('./4-inputs/energies.dat',np.array([E_qmmm,E_qmmm_0,E_qmmm-E_qmmm_0]),header='E_QMMM,E_QM+E_MM,Interaction [Hartree]')
 
 # get interaction energy decomposition into atom-wise terms
 int_energies = qmmm_system.qm_system.getInteractionEnergyDecomposition(print_decomp=True)

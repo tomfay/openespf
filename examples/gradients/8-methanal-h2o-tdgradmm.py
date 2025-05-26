@@ -46,7 +46,8 @@ grad_resp.kernel()
 pdb = PDBFile("7-inputs/h2o.pdb")
 topology = pdb.getTopology() 
 positions = pdb.getPositions()
-forcefield = ForceField("7-inputs/h2o.xml")
+#forcefield = ForceField("7-inputs/h2o.xml")
+forcefield = ForceField("amoeba2018.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
 platform = Platform.getPlatformByName("Reference")
 integrator = VerletIntegrator(1e-16*picoseconds)
@@ -76,8 +77,6 @@ qmmm_system.mm_system.use_prelim_mpole = False # set to true to use pre-limit fo
 qmmm_system.mm_system.prelim_dr = 5.0e-3 # default value is 1.0e-2
 qmmm_system.mm_system.resp_mode_force = "linear"
 
-qmmm_system.qm_system.jdrf_pre = 1.0 
-qmmm_system.qm_system.kdrf_pre = 1.0 
 
 # get positions for the QM and MM atoms
 mm_positions_ref = simulation.context.getState(getPositions=True).getPositions(asNumpy=True)._value
@@ -103,9 +102,9 @@ dm = mf.make_rdm1()
 qmmm_system.qm_system.dm_guess = dm
 
 # position of H-O-H H atom in nm
-R_HOH = np.array([0.2,0,0])
+R_HOH = np.array([0.25,0,0])
 # set up a grid of separations in nanometres units
-R_vals = np.linspace(0.5,-0.5,num=7) * 0.025
+R_vals = np.linspace(0.5,-0.5,num=21) * 0.01
 energies = np.zeros((3,R_vals.shape[0]))
 energies_resp = np.zeros((3,R_vals.shape[0]))
 forces_qm = np.zeros((3,R_vals.shape[0],qm_positions.shape[0],3))
@@ -200,7 +199,7 @@ axes = {0:"x",1:"y",2:"z"}
 for x in range(0,3):
     plt.plot(R_vals*1.0e1,(energies[x,:]-E_qmmm_0)*1e3,label="Energies along "+axes[x])
 plt.xlabel("Separation [Angstrom]")
-plt.ylabel("Ground state energy [mH]")
+plt.ylabel("Energy [mH]")
 plt.legend()
 plt.show()
     
@@ -210,7 +209,7 @@ for x in range(0,3):
     plt.plot(R_vals_num*1.0e1,(forces_num[x][2:-2])*1e3,label="Numerical "+axes[x])
     plt.plot(R_vals*1.0e1,(forces_an[x])*1e3,'--',label="Analytical "+axes[x])
 plt.xlabel("Separation [Angstrom]")
-plt.ylabel("Ground state force [mH/bohr]")
+plt.ylabel("Force [mH/bohr]")
 plt.legend()
 
 plt.show()
@@ -220,7 +219,7 @@ axes = {0:"x",1:"y",2:"z"}
 for x in range(0,3):
     plt.plot(R_vals*1.0e1,(energies_resp[x,:]-E_qmmm_0)*1e3,label="Energies along "+axes[x])
 plt.xlabel("Separation [Angstrom]")
-plt.ylabel("TDDFT Energy [mH]")
+plt.ylabel("Energy [mH]")
 plt.legend()
 plt.show()
     
@@ -231,7 +230,7 @@ for x in range(0,3):
     plt.plot(R_vals*1.0e1,(forces_resp_an[x])*1e3,'--',label="Analytical "+axes[x])
     #plt.plot(R_vals*1.0e1,(forces_an[x])*1e3,':',label="Analytical S0"+axes[x])
 plt.xlabel("Separation [Angstrom]")
-plt.ylabel("TDDFT Force [mH/bohr]")
+plt.ylabel("Force [mH/bohr]")
 plt.legend()
 
 plt.show()

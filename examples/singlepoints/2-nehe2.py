@@ -33,7 +33,7 @@ topology = pdb.getTopology()
 positions = pdb.getPositions()
 forcefield = ForceField("2-inputs/he.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
-platform = Platform.getPlatformByName("CPU")
+platform = Platform.getPlatformByName("Reference")
 integrator = VerletIntegrator(1e-16*picoseconds)
 simulation = Simulation(topology, system, integrator,platform)
 simulation.context.setPositions(positions)
@@ -54,6 +54,7 @@ qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole
 # set additional parameters for the exchange repulsion + damping of electrostatics
 qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info=None)
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
+qmmm_system.mm_system.use_prelim_mpole = False
 
 # get positions for the QM and MM atoms
 mm_positions = simulation.context.getState(getPositions=True).getPositions()
@@ -89,6 +90,9 @@ for n,R in enumerate(R_vals):
     # save enegy
     energies[n] =  E_qmmm + 0
 
+print("Interaction energies [Hartree]:")
+print(energies-E_qmmm_0)
+#np.savetxt("./2-inputs/int-energies-prelim.dat",np.vstack((R_vals,energies-E_qmmm_0)).T,delimiter=',',header='Separation [Bohr],Interaction energy [Hartree]')
 
 # plot energies 
 plt.plot(R_vals*Data.BOHR_TO_ANGSTROM,(energies-E_qmmm_0)*1e3,label="QM/MM ESPF-DRF")

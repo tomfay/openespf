@@ -33,7 +33,7 @@ topology = pdb.getTopology()
 positions = pdb.getPositions()
 forcefield = ForceField("2-inputs/he.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
-platform = Platform.getPlatformByName("CPU")
+platform = Platform.getPlatformByName("Reference")
 integrator = VerletIntegrator(1e-16*picoseconds)
 simulation = Simulation(topology, system, integrator,platform)
 simulation.context.setPositions(positions)
@@ -54,7 +54,7 @@ qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole
 # set additional parameters for the exchange repulsion + damping of electrostatics
 qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info=None)
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
-qmmm_system.mm_system.resp_mode_force = "linear"
+#qmmm_system.mm_system.use_prelim_mpole = True
 
 # get positions for the QM and MM atoms
 mm_positions = simulation.context.getState(getPositions=True).getPositions()
@@ -106,6 +106,8 @@ for n in range(2,N_R-2):
 f_num_4 *= -(1.0/dR)
 f_num_4[0:2] = np.nan
 f_num_4[[N_R-2,N_R-1]] = np.nan
+
+np.savetxt("./2-inputs/output-prelim.dat",np.hstack((R_vals[2:-2,None],energies[2:-2,None],f_num_4[2:-2,None],-forces_qm[2:-2,0,:],forces_mm[2:-2,0,:])),header="R [Bohr],Energy [au],Numerical force[au],-F_QM[au],F_MM[au]")
 
 # plot energies and model -α/2R^4 expected at long range
 plt.plot(R_vals[2:-2]*Data.BOHR_TO_ANGSTROM,(f_num_4[2:-2])*1e3,label="Numerical forces")

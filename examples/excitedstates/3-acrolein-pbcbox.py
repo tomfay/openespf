@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 
 
 # Get info MM He system and set up the OpenMM simulation object
-pdb = PDBFile("3-inputs/acrolein-pbcbox.pdb")
+pdb = PDBFile("1-inputs/acetone-waterbox-eq.pdb")
 modeller = Modeller(pdb.getTopology() , pdb.getPositions())
 modeller.delete([r for r in modeller.topology.residues() if r.name == "UNL"])
 topology = modeller.getTopology()
@@ -29,7 +29,7 @@ positions = modeller.getPositions()
 forcefield = ForceField("3-inputs/h2o.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=PME,nonbondedCutoff=1.0*nanometer)
 #system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
-platform = Platform.getPlatformByName("OpenCL")
+platform = Platform.getPlatformByName("Reference")
 integrator = VerletIntegrator(1e-16*picoseconds)
 simulation = Simulation(topology, system, integrator,platform)
 simulation.context.setPositions(positions)

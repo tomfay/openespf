@@ -1,23 +1,25 @@
-from pyscf import gto, scf, dft, tddft, ao2mo, lib, grad
+from pyscf import gto, scf, dft, tddft, ao2mo, lib, grad, dispersion
 from pyscf.dft import numint
 import numpy as np
 from scipy.linalg import sqrtm, inv, solve
 from .QMMultipole import QMMultipole
+from .MultipoleForceExtras import getDist
 from copy import deepcopy, copy
+from timeit import default_timer as timer
 
 
 '''
 A wrapper for PySCF methods for calculating QM component of QM/MM energies and forces.
 '''
 
-def getDist(x_A_set,x_B,pbc=None):
-    if pbc is None:
-        dx = (x_A_set - x_B[None,:])
-        return np.linalg.norm(dx,axis=1), dx
-    else:
-        dx = x_A_set - x_B[None,:]
-        dx_ni = dx - pbc[None,:]*np.round(dx/pbc[None,:])
-        return np.linalg.norm(dx_ni,axis=1), dx_ni
+#def getDist(x_A_set,x_B,pbc=None):
+#    if pbc is None:
+#        dx = (x_A_set - x_B[None,:])
+#        return np.linalg.norm(dx,axis=1), dx
+#    else:
+#        dx = x_A_set - x_B[None,:]
+#        dx_ni = dx - pbc[None,:]*np.round(dx/pbc[None,:])
+#        return np.linalg.norm(dx_ni,axis=1), dx_ni
 
 def calculateGradOvlp(mol,A,row=True,col=True):
     N_AO = mol.nao
@@ -41,7 +43,7 @@ def calculateGradOvlpRows(mol,A):
     return -ip,ao_start,ao_end
 
 class QMSystem:
-    def __init__(self,qm_mf,qm_resp=None,int_method="drf",rep_method="exch",multipole_order=0,multipole_method="espf"):
+    def __init__(self,qm_mf,qm_resp=None,int_method="dreem",rep_method="exch",multipole_order=0,multipole_method="espf"):
         self.mf = qm_mf.copy()
         self.mol = self.mf.mol
         self.resp = qm_resp
@@ -52,11 +54,11 @@ class QMSystem:
         self.positions = self.mol.atom_coords(unit="Bohr")
         self.multipole = QMMultipole(mol=self.mol,multipole_order=self.multipole_order,multipole_method=self.multipole_method)
         self.dm_guess=None
-        self.drf_method = "get_jk"
+        self.dreem_method = "get_jk"
         
         # debug options
-        self.jdrf_pre = 1.0
-        self.kdrf_pre = 1.0
+        self.jdreem_pre = 1.0
+        self.kdreem_pre = 1.0
         return
     
     def getPositions(self):
@@ -122,7 +124,7 @@ class QMSystem:
         N_QM = len(Z) 
         
         # set up the polarization energy expansion
-        if self.int_method == "drf":
+        if self.int_method == "dreem":
             # first get the u_0 term from the nuclear charges: u_0 = Σ_Α Z_A U_1A + (1/2) Σ_Α,Β Z_A U_2AB Z_B 
             u_nuc_ind = np.einsum('B,AB->A',Z,self.U_2[0:N_QM,0:N_QM])
             u_0 = np.einsum('A,A', (self.U_1[0:N_QM] + 0.5*u_nuc_ind) ,Z) 
@@ -136,7 +138,7 @@ class QMSystem:
             self.u_2 = u_2
         
         # set up the correction to the one electron Hamiltonian from embedding
-        if self.int_method == "drf":
+        if self.int_method == "dreem":
             # first the u_0 term
             #h_int = (u_0/self.mf.mol.nelectron) * self.S
             # the induction term
@@ -152,26 +154,26 @@ class QMSystem:
             self.mf_qmmm.get_hcore = lambda *args : (h_qmmm)
             
         # set up 2-e integrals if using incore
-        if self.int_method == "drf" and hasattr(self.mf_qmmm,'incore_anyway'):
+        if self.int_method == "dreem" and hasattr(self.mf_qmmm,'incore_anyway'):
             if self.mf_qmmm.incore_anyway:
                 eri = self.mf_qmmm.mol.intor('cint2e_sph', aosym='s1')
                 eri += np.einsum('Aij,Akl->ijkl',self.Q,self.u2_Q,optimize=True)
                 self.mf_qmmm._eri = ao2mo.restore(8, eri, self.mf_qmmm.mol.nao)
         
         # set up corrections to the generator of v_eff, j and k
-        if self.int_method == "drf" and self.drf_method == "get_veff":
-            # set-up the DRF part of the J and K matrix calculation
-            #self.mf_int.get_j = lambda *args,**kwargs  : self.get_j_drf(args[1])
-            #self.mf_int.get_k = lambda *args,**kwargs  : self.get_k_drf(args[1])
-            #self.mf_int.get_jk = lambda *args,**kwargs: (self.get_j_drf(args[1]),self.get_k_drf(args[1]))
+        if self.int_method == "dreem" and self.dreem_method == "get_veff":
+            # set-up the dreem part of the J and K matrix calculation
+            #self.mf_int.get_j = lambda *args,**kwargs  : self.get_j_dreem(args[1])
+            #self.mf_int.get_k = lambda *args,**kwargs  : self.get_k_dreem(args[1])
+            #self.mf_int.get_jk = lambda *args,**kwargs: (self.get_j_dreem(args[1]),self.get_k_dreem(args[1]))
             # modify the get_veff function the scf_qmmm object used for the SCF calculation
-            self.mf_qmmm.get_veff = lambda *args,**kwargs: self.get_veff_drf(self.mf_qmmm,args[1],**kwargs)
-        elif self.int_method == "drf" and self.drf_method == "get_jk":
+            self.mf_qmmm.get_veff = lambda *args,**kwargs: self.get_veff_dreem(self.mf_qmmm,args[1],**kwargs)
+        elif self.int_method == "dreem" and self.dreem_method == "get_jk":
             if "HF" in self.mf.__class__.__name__ :
                 self.mf_qmmm.get_jk = lambda *args,**kwargs: self.get_jk_mod(*args,**kwargs,vk_scal=1.0)
             elif self.mf_qmmm._numint.libxc.is_hybrid_xc(self.mf.xc):
                 omega, alpha, hyb = self.mf_qmmm._numint.rsh_and_hybrid_coeff(self.mf.xc, spin=self.mf.mol.spin)
-                # scaling of vk_drf depends on method
+                # scaling of vk_dreem depends on method
                 if omega == 0:
                     vk_scal = hyb
                 elif alpha == 0 :
@@ -217,49 +219,52 @@ class QMSystem:
         self.resp_qmmm._scf = self.mf_qmmm 
         type(self.resp).__init__(self.resp_qmmm,self.mf_qmmm)
         
-        if self.int_method == "drf" and self.drf_method == "get_veff":
+        if self.int_method == "dreem" and self.dreem_method == "get_veff":
             # modify the response object
             singlet = self.resp_qmmm.singlet
             vresp = self.mf.gen_response(singlet=singlet,mo_coeff=self.resp_qmmm._scf.mo_coeff, mo_occ=self.resp_qmmm._scf.mo_occ,hermi=0)
-            vresp_drf = self.mf_int.gen_response(singlet=singlet,mo_coeff=self.resp_qmmm._scf.mo_coeff, mo_occ=self.resp_qmmm._scf.mo_occ,hermi=0)
-            self.resp_qmmm._scf.gen_response = lambda singlet=singlet,hermi=0: (lambda *args2 : vresp(*args2)+vresp_drf(*args2))
-        elif self.int_method == "drf" and self.drf_method == "get_jk":
+            vresp_dreem = self.mf_int.gen_response(singlet=singlet,mo_coeff=self.resp_qmmm._scf.mo_coeff, mo_occ=self.resp_qmmm._scf.mo_occ,hermi=0)
+            self.resp_qmmm._scf.gen_response = lambda singlet=singlet,hermi=0: (lambda *args2 : vresp(*args2)+vresp_dreem(*args2))
+        elif self.int_method == "dreem" and self.dreem_method == "get_jk":
             # no modification should be needed if the methodf is "get_jk" need to check this
             self.resp_qmmm = self.resp_qmmm
         return
 
-    def get_veff_drf(self,mf_obj,dm):
+    def get_veff_dreem(self,mf_obj,dm):
         '''
         The modified 
         '''
         if dm is None:
             dm = mf_obj.make_rdm1()
-        # get vxc from scf without added DRF terms
+        # get vxc from scf without added dreem terms
         vxc = self.mf.get_veff(dm=dm)
-        vxc_drf = self.mf_int.get_veff(dm=dm)
-        #print(dir(vxc_drf))
+        vxc_dreem = self.mf_int.get_veff(dm=dm)
+        #print(dir(vxc_dreem))
         ecoul = vxc.ecoul
         exc = vxc.exc 
-        vj = vxc.vj + vxc_drf.vj
+        vj = vxc.vj + vxc_dreem.vj
         if vxc.vk is not None:
-            vk = vxc.vk + vxc_drf.vk
+            vk = vxc.vk + vxc_dreem.vk
         else:
-            vk = vxc_drf.vk
-        vxc = lib.tag_array(vxc+vxc_drf, ecoul=(ecoul+vxc_drf.ecoul), exc=(exc+vxc_drf.exc), vj=vj, vk=vk)
+            vk = vxc_dreem.vk
+        vxc = lib.tag_array(vxc+vxc_dreem, ecoul=(ecoul+vxc_dreem.ecoul), exc=(exc+vxc_dreem.exc), vj=vj, vk=vk)
 
         return vxc
     
-    def get_j_drf(self,dm):
+    def get_j_dreem(self,dm):
         '''
-        Generates the coulomb matrix J for a given density matrix dm arising from the DRF 2-e interaction
+        Generates the coulomb matrix J for a given density matrix dm arising from the dreem 2-e interaction
         '''
         if type(dm)==type((None,)) or type(dm)==type([]):
             j = []
             for dm_n in dm:
                 #q = np.einsum('Aij,ij->A',self.Q,dm_n)
                 #j.append(np.einsum('A,Aij->ij',q,self.u2_Q))
-                q = np.einsum('bkl,lk->b',self.Q,dm_n) # re-defined for consistency with pyscf
-                j.append(self.jdrf_pre*np.einsum('bij,b->ij',self.u2_Q,q))
+                if not hasattr(self,'q_einpath'):
+                    self.q_einpath = np.einsum_path('bkl,lk->b',self.Q,dm_n,optimize="optimal")[0]
+                    #self.q_einpath = False
+                q = np.einsum('bkl,lk->b',self.Q,dm_n,optimize=self.q_einpath) # re-defined for consistency with pyscf
+                j.append(self.jdreem_pre*np.einsum('bij,b->ij',self.u2_Q,q))
             if type(dm)==type((None,)):
                 return tuple(j)
             elif type(dm)==type([]):
@@ -267,27 +272,39 @@ class QMSystem:
         elif len(dm.shape)==2:
             #q = np.einsum('Aij,ij->A',self.Q,dm)
             #return np.einsum('A,Aij->ij',q,self.u2_Q)
-            q = np.einsum('bkl,lk->b',self.Q,dm) # re-defined for consistency with pyscf
-            return self.jdrf_pre*np.einsum('bij,b->ij',self.u2_Q,q)
+            if not hasattr(self,'q_einpath'):
+                self.q_einpath = np.einsum_path('bkl,lk->b',self.Q,dm,optimize="optimal")[0]
+                #self.q_einpath = False
+            q = np.einsum('bkl,lk->b',self.Q,dm,optimize=self.q_einpath) # re-defined for consistency with pyscf
+            return self.jdreem_pre*np.einsum('bij,b->ij',self.u2_Q,q)
         elif len(dm.shape)==3:
             #q = np.einsum('Aij,nij->nA',self.Q,dm)
             #j = np.sum(np.einsum('nA,Aij->nij',q,self.UQ),axis=0)
             #return np.array([j,j])
             #return np.einsum('nA,Aij->nij',q,self.u2_Q)
-            q = np.einsum('bkl,nlk->nb',self.Q,dm) # re-defined for consistency with pyscf
-            return self.jdrf_pre*np.einsum('Aij,nA->nij',self.u2_Q,q)
+            if not hasattr(self,'qs_einpath'):
+                self.qs_einpath = np.einsum_path('bkl,nlk->nb',self.Q,dm,optimize="optimal")[0]
+                #self.qs_einpath = True
+            q = np.einsum('bkl,nlk->nb',self.Q,dm,optimize=self.qs_einpath) # re-defined for consistency with pyscf
+            return self.jdreem_pre*np.einsum('Aij,nA->nij',self.u2_Q,q)
 
-    def get_k_drf(self,dm,vk_scal=1.0):
+    def get_k_dreem(self,dm,vk_scal=1.0):
         '''
-        Generates the exchange matrix K for a given density matrix dm arising from the DRF 2-e interaction
+        Generates the exchange matrix K for a given density matrix dm arising from the dreem 2-e interaction
         '''
         if type(dm)==type((None,)) or type(dm)==type([]):
             k = []
             for dm_n in dm:
                 #dmQ = np.einsum('jk,Bkl->Bjl',dm_n,self.Q)
                 #k.append((1.0/vk_scal)*np.einsum('Aij,Ajl->il',self.u2_Q,dmQ))
-                dmQ = np.einsum('lk,Bkj->Blj',dm_n,self.Q)
-                k.append(self.kdrf_pre*(1.0/vk_scal)*np.einsum('Ail,Alj->ij',self.u2_Q,dmQ))
+                if not hasattr(self,'dmQ_einpath'):
+                    self.dmQ_einpath = np.einsum_path('lk,Bkj->Blj',dm_n,self.Q,optimize="optimal")[0]
+                    #self.dmQ_einpath = False
+                dmQ = np.einsum('lk,Bkj->Blj',dm_n,self.Q,optimize=self.dmQ_einpath)
+                if not hasattr(self,'kdreem_einpath'):
+                    self.kdreem_einpath = np.einsum_path('Ail,Alj->ij',self.u2_Q,dmQ,optimize="optimal")[0]
+                    #self.kdreem_einpath = False
+                k.append(self.kdreem_pre*(1.0/vk_scal)*np.einsum('Ail,Alj->ij',self.u2_Q,dmQ,optimize=self.kdreem_einpath))
             if type(dm)==type((None,)):
                 return tuple(k)
             elif type(dm)==type([]):
@@ -295,13 +312,26 @@ class QMSystem:
         if len(dm.shape)==2:
             #dmQ = np.einsum('jk,Bkl->Bjl',dm,self.Q)
             #return (1.0/vk_scal)*np.einsum('Aij,Ajl->il',self.u2_Q,dmQ)
-            dmQ = np.einsum('lk,Bkj->Blj',dm,self.Q)
-            return self.kdrf_pre*(1.0/vk_scal)*np.einsum('Ail,Alj->ij',self.u2_Q,dmQ)
+            if not hasattr(self,'dmQ_einpath'):
+                self.dmQ_einpath = np.einsum_path('lk,Bkj->Blj',dm,self.Q,optimize="optimal")[0]
+                #self.dmQ_einpath = True
+            dmQ = np.einsum('lk,Bkj->Blj',dm,self.Q,optimize=self.dmQ_einpath)
+            if not hasattr(self,'kdreem_einpath'):
+                self.kdreem_einpath = np.einsum_path('Ail,Alj->ij',self.u2_Q,dmQ,optimize="optimal")[0]
+                #self.kdreem_einpath = False
+            return self.kdreem_pre*(1.0/vk_scal)*np.einsum('Ail,Alj->ij',self.u2_Q,dmQ,optimize=self.kdreem_einpath)
         elif len(dm.shape)==3:
             #dmQ = np.einsum('njk,Bkl->nBjl',dm,self.Q)
             #return (1.0/vk_scal)*np.einsum('Aij,nAjl->nil',self.u2_Q,dmQ)
-            dmQ =  np.einsum('nlk,Bkj->nBlj',dm,self.Q)
-            return self.kdrf_pre*(1.0/vk_scal)*np.einsum('Ail,nAlj->nij',self.u2_Q,dmQ)
+            if not hasattr(self,'dmsQ_einpath'):
+                #self.dmsQ_einpath = np.einsum_path('nlk,Bkj->nBlj',dm,self.Q,optimize="optimal")[0]
+                self.dmsQ_einpath = False
+               
+            dmQ =  np.einsum('nlk,Bkj->nBlj',dm,self.Q,optimize=self.dmsQ_einpath)
+            if not hasattr(self,'ksdreem_einpath'):
+                self.ksdreem_einpath = np.einsum_path('Ail,nAlj->nij',self.u2_Q,dmQ,optimize="optimal")[0]
+                #self.ksdreem_einpath = False 
+            return self.kdreem_pre*(1.0/vk_scal)*np.einsum('Ail,nAlj->nij',self.u2_Q,dmQ,optimize=self.ksdreem_einpath)
     
     def get_jk_mod(self, mol=None, dm=None, hermi=1, with_j=True, with_k=True,
                omega=None,vk_scal=1.0):
@@ -314,12 +344,12 @@ class QMSystem:
         vj, vk = self.mf.get_jk(mol=mol, dm=dm, hermi=hermi, with_j=with_j, with_k=with_k, omega=omega)
         
         if with_j:
-            vj += self.get_j_drf(dm)
+            vj += self.get_j_dreem(dm)
         if with_k:
             if vk_scal is not None:
-                vk += self.get_k_drf(dm,vk_scal=vk_scal)
+                vk += self.get_k_dreem(dm,vk_scal=vk_scal)
             else:
-                vk = self.get_k_drf(dm)
+                vk = self.get_k_dreem(dm)
         
         return vj, vk
         
@@ -469,9 +499,9 @@ class QMSystem:
         N_AO = dm0.shape[-1]
         if len(dm0.shape)==2:
             dm0 = dm0.reshape((1,N_AO,N_AO))
-        dm = lib.einsum('snm->nm',dm0)
+        dm = np.einsum('snm->nm',dm0)
         F = np.zeros(self.F_0_qm[atom_id,:].shape)
-        if self.int_method == "drf" :
+        if self.int_method == "dreem" :
             # first the terms that do not involve gradients of the charge operators
             # first deal with the zero electron part
             Z = self.mf_qmmm.mol.atom_charges()
@@ -485,21 +515,25 @@ class QMSystem:
                 F += 0.5 * lib.einsum('xab,ab->x',self.F_2_qm[atom_id,:,:,:],self.av_QQ_1e+self.av_QQ_2e,optimize=True)
             
             # the multipole operator gradient terms
-            grad_Q = 1.0*self.multipole.getGradMultipoleOperators(atom_id)
-            av_grad_Q = (lib.einsum('xanm,nm->xa',grad_Q,dm,optimize=True))
+            grad_Q = self.multipole.getGradMultipoleOperators(atom_id)
+            if not hasattr(self,'avdQ_einpath'):
+                self.avdQ_einpath = np.einsum_path('xanm,nm->xa',grad_Q,dm,optimize="optimal")[0]
+            av_grad_Q = (np.einsum('xanm,nm->xa',grad_Q,dm,optimize=self.avdQ_einpath))
             #av_grad_Q = 0.5*(lib.einsum('xanm,nm->xa',grad_Q,dm)+lib.einsum('xanm,mn->xa',grad_Q,dm))
             #print(av_grad_Q)
             # u_1 term
-            F -= lib.einsum('xa,a->x',av_grad_Q,self.u_1)
+            F -= np.einsum('xa,a->x',av_grad_Q,self.u_1)
             # self term
-            dm0_grad_Q = lib.einsum('snm,xanl->sxaml',dm0,grad_Q,optimize=True)
+            #dm0_grad_Q = np.einsum('snm,xanl->sxaml',dm0,grad_Q,optimize=True)
             #dm_grad_Q = lib.einsum('sxaml->xaml',dm0_grad_Q,optimize=True)
             #dm_grad_Q = np.sum(dm0_grad_Q,axis=0)
             #dm_grad_Q_Sinv = lib.einsum('xaml,lk->xamk',dm_grad_Q,self.S_inv,optimize=True)
             #F -= lib.einsum('xamk,akm->x',dm_grad_Q_Sinv,self.u2_Q,optimize=True) # no factor of 1/2 because of dQ/dx Q + Q dQ/dx
             #F -= lib.einsum('xamk,amk->x',dm_grad_Q,self.uQSinv,optimize=True)
             # optimized version
-            F -= np.einsum('xamk,akm->x',grad_Q,self.uSinvQdm,optimize=True)
+            if not hasattr(self,'F_einpath'):
+                self.F_einpath = np.einsum_path('xamk,akm->x',grad_Q,self.uSinvQdm,optimize="optimal")[0]
+            F -= np.einsum('xamk,akm->x',grad_Q,self.uSinvQdm,optimize=self.F_einpath)
             # grad S inv term
             # This part can be optimised by exploiting the sparsity of grad_S
             #grad_Sinv_Q = calculateGradOvlp(self.mol,atom_id)
@@ -512,8 +546,12 @@ class QMSystem:
             
             # optimized version
             grad_S,ao_start,ao_end = calculateGradOvlpRows(self.mol,atom_id)
-            A = np.einsum('xnm,aml->xanl',grad_S,self.SinvQdm)
-            F += 1.0*lib.einsum('amn,xanm->x',self.uQSinv[:,:,ao_start:ao_end],A)
+            if not hasattr(self,'A_einpath'):
+                self.A_einpath = np.einsum_path('xnm,aml->xanl',grad_S,self.SinvQdm,optimize="optimal")[0]
+            A = np.einsum('xnm,aml->xanl',grad_S,self.SinvQdm,optimize=self.A_einpath)
+            if not hasattr(self,'FA_einpath'):
+                self.FA_einpath = np.einsum_path('amn,xanm->x',self.uQSinv[:,:,ao_start:ao_end],A,optimize="optimal")[0]
+            F += np.einsum('amn,xanm->x',self.uQSinv[:,:,ao_start:ao_end],A,optimize=self.FA_einpath)
             #A = np.einsum('anm,xlm->xanl',self.uQSinv,grad_S)
             #F += 0.5*lib.einsum('xanm,anm->x',A,self.SinvQdm[:,:,ao_start:ao_end])
             
@@ -521,7 +559,8 @@ class QMSystem:
             # the 2e terms
             #grad_QQ_2e_c = lib.einsum('xa,b->xab',av_grad_Q,self.av_Q,optimize=True)
             #grad_QQ_2e_c += grad_QQ_2e_c.transpose(0,2,1)
-            F -= self.jdrf_pre*np.einsum('xa,a->x',av_grad_Q,self.av_uQ)
+            
+            F -= self.jdreem_pre*np.einsum('xa,a->x',av_grad_Q,self.av_uQ)
             #grad_QQ_2e_c += lib.einsum('xa,b->xba',av_grad_Q,self.av_Q,optimize=True)
             #dm0_Q = self.dm_Q
             #grad_QQ_2e_x = lib.einsum('sxanm,sbmn->xab',dm0_grad_Q,dm0_Q,optimize=True)
@@ -530,17 +569,18 @@ class QMSystem:
             #if dm0.shape[0]==1:
                 #grad_QQ_2e_x *= 0.5 
             
-            #F -= 0.5*lib.einsum('xab,ab->x',self.jdrf_pre*grad_QQ_2e_c - self.kdrf_pre*grad_QQ_2e_x , self.u_2)
-            #F -= 0.5*lib.einsum('xab,ab->x',- self.kdrf_pre*grad_QQ_2e_x , self.u_2)
+            #F -= 0.5*lib.einsum('xab,ab->x',self.jdreem_pre*grad_QQ_2e_c - self.kdreem_pre*grad_QQ_2e_x , self.u_2)
+            #F -= 0.5*lib.einsum('xab,ab->x',- self.kdreem_pre*grad_QQ_2e_x , self.u_2)
             
             if dm0.shape[0]==1:
-                prefactor = 0.5*self.kdrf_pre
+                prefactor = 0.5*self.kdreem_pre
             else:
-                prefactor = 1.0*self.kdrf_pre
-            F += prefactor * lib.einsum('sxanm,samn->x',dm0_grad_Q,self.dm0_uQ,optimize=True)
+                prefactor = 1.0*self.kdreem_pre
+            #F += prefactor * lib.einsum('sxanm,samn->x',dm0_grad_Q,self.dm0_uQ,optimize=True)
+            if not hasattr(self,'Fx_einpath'):
+                self.Fx_einpath = np.einsum_path('xanm,anm->x',grad_Q,self.dm0_dm0_uQ,optimize="optimal")[0]
+            F += prefactor * np.einsum('xanm,anm->x',grad_Q,self.dm0_dm0_uQ,optimize=self.Fx_einpath)
             
-                
-            #print("F_gradQ=",F-F_nogradQ)
         
         if self.rep_method == "exch":
             F += self.getExchRepForceQM(dm,atom_id)
@@ -652,9 +692,9 @@ class QMSystem:
         #av_QQ_2e_x = 0.5*(av_QQ_2e_x + av_QQ_2e_x.T)
         av_QQ_2e_x *= -1.0
         if comb_coulexch:
-            return av_Q, av_QQ_1e, self.jdrf_pre*av_QQ_2e_c - self.kdrf_pre*av_QQ_2e_x
+            return av_Q, av_QQ_1e, self.jdreem_pre*av_QQ_2e_c - self.kdreem_pre*av_QQ_2e_x
         else:
-            return av_Q, av_QQ_1e, self.jdrf_pre*av_QQ_2e_c, self.kdrf_pre*av_QQ_2e_x
+            return av_Q, av_QQ_1e, self.jdreem_pre*av_QQ_2e_c, self.kdreem_pre*av_QQ_2e_x
     
     def hcore_int_generator(self):
         '''
@@ -664,8 +704,8 @@ class QMSystem:
 
         def h_int_deriv(atm_id):
             h1 = np.zeros((3,N_AO,N_AO))
-            # add the DRF terms
-            if self.int_method == "drf":
+            # add the dreem terms
+            if self.int_method == "dreem":
                 grad_Q = self.multipole.getGradMultipoleOperators(atm_id)
                 du_0,du_1,du_2 = self.getGradQMPolExp(atm_id)
                 # first the linear induction term
@@ -703,8 +743,10 @@ class QMSystem:
         dm = np.array(self.mf_qmmm.make_rdm1())
         if len(dm.shape)==2:
             self.dm0_uQ = np.einsum('snm,amk->sank',dm[None,:,:],self.u2_Q,optimize=True)
+            self.dm0_dm0_uQ = np.einsum('snm,sakm->ank',dm[None,:,:],self.dm0_uQ,optimize=True)
         else:
             self.dm0_uQ = np.einsum('snm,amk->sank',dm,self.u2_Q,optimize=True)
+            self.dm0_dm0_uQ = np.einsum('snm,sakm->ank',dm,self.dm0_uQ,optimize=True)
         if len(dm.shape)==3:
             dm = dm[0,:,:] + dm[1,:,:]
         self.SinvQdm = np.einsum('nm,aml->anl',self.S_inv,self.Q)
@@ -712,6 +754,7 @@ class QMSystem:
         self.uSinvQdm = np.einsum('ab,bnm->anm',self.u_2,self.SinvQdm)
         self.av_uQ = np.einsum('ab,b->a',self.u_2,self.av_Q)
         
+        #self.dmeff = self.uSinvQdm - 1.0*self.k_dreem_pre*
         return
     
     def getForces(self,units_out="AU",return_terms=False):
@@ -790,7 +833,7 @@ class QMSystem:
         Returns the force on MM atoms
         '''
         F = np.zeros(self.F_0_mm.shape)
-        if self.int_method == "drf":
+        if self.int_method == "dreem":
             # first deal with the zero electron part
             Z = self.mf_qmmm.mol.atom_charges()
             N_QM = len(Z)
@@ -835,7 +878,7 @@ class QMSystem:
             
         
                 
-        if self.int_method == "drf":
+        if self.int_method == "dreem":
             # first deal with the zero electron part
             Z = self.mf_qmmm.mol.atom_charges()
             N_QM = len(Z)
@@ -902,7 +945,7 @@ class QMSystem:
         self.createModifiedGradResp()
         F = -self.grad_resp_qmmm.kernel(state=state)
         
-        if self.int_method == "drf":
+        if self.int_method == "dreem":
             # first the Hellman-Feynman parts
             # first deal with the zero electron part
             Z = self.mf_qmmm.mol.atom_charges()
@@ -934,22 +977,31 @@ class QMSystem:
             Q_dm0 = np.einsum('anm,ln->aml',self.Q,dm0,optimize=True)
             uQ_dm = np.einsum('ab,bnm->anm',self.u_2,Q_dm)
             uQ_dm0 = np.einsum('ab,bnm->anm',self.u_2,Q_dm0)
+            dm_uQ_dm0 = np.einsum('nl,alm->anm',dm,uQ_dm0)
+            #dm0_uQ_dm = np.einsum('nl,alm->anm',dm0,uQ_dm)
             
             Q_xpy = np.einsum('anm,ln->aml',self.Q,(dmxpy),optimize=True)
             Q_xpy_xpyT = np.einsum('anm,nl->aml',self.Q,(dmxpy+dmxpy.T),optimize=True)
             uQ_xpy = np.einsum('ab,bnm->anm',self.u_2,Q_xpy)
             uQ_xpy_xpyT = np.einsum('ab,bnm->anm',self.u_2,Q_xpy_xpyT)
+            xpy_uQ_xpy_xpyT = np.einsum('ln,alm->anm',dmxpy,uQ_xpy_xpyT)
+            xpy_xpyT_uQ_xpy = np.einsum('nl,alm->anm',(dmxpy+dmxpy.T),uQ_xpy)
             
             Q_xmy = np.einsum('anm,ln->aml',self.Q,(dmxmy),optimize=True)
             Q_xmy_xmyT = np.einsum('anm,nl->aml',self.Q,(dmxmy-dmxmy.T),optimize=True)
             uQ_xmy = np.einsum('ab,bnm->anm',self.u_2,Q_xmy)
             uQ_xmy_xmyT = np.einsum('ab,bnm->anm',self.u_2,Q_xmy_xmyT)
+            xmy_uQ_xmy_xmyT = np.einsum('ln,alm->anm',dmxmy,uQ_xmy_xmyT)
+            xmy_xmyT_uQ_xmy = np.einsum('nl,alm->anm',(dmxmy-dmxmy.T),uQ_xmy)
 
             uQSinv = self.uQSinv
             SinvQdm = np.einsum('nm,aml->anl',self.S_inv,self.Q,optimize=True)
             SinvQdm = np.einsum('anm,ml->anl',SinvQdm,dm,optimize=True)
             uSinvQdm = np.einsum('ab,bnl->anl',self.u_2,SinvQdm,optimize=True)
             
+            #dmeff = uSinvQdm - (xmy_xpmT_uQ_xmy + xmy_uQ_xmy_xmyT) - (xpy_xpyT_uQ_xpy + xpy_uQ_xpy_xpyT) - dm_uQ_dm0
+            #dmeff = - (xmy_xmyT_uQ_xmy + xmy_uQ_xmy_xmyT) - (xpy_xpyT_uQ_xpy + xpy_uQ_xpy_xpyT) - dm_uQ_dm0
+            dmeff = uSinvQdm -1.0 *self.kdreem_pre*(dm_uQ_dm0+xmy_xmyT_uQ_xmy + xmy_uQ_xmy_xmyT+xpy_xpyT_uQ_xpy + xpy_uQ_xpy_xpyT)
             for atom_id in range(0,N_QM):
                 # the multipole operator gradient terms
                 grad_Q = self.multipole.getGradMultipoleOperators(atom_id)
@@ -963,7 +1015,8 @@ class QMSystem:
                 #dm_grad_Q = np.einsum('nm,xanl->xaml',dm,grad_Q,optimize=True)
                 #dm_grad_Q_Sinv = np.einsum('xaml,lk->xamk',dm_grad_Q,self.S_inv,optimize=True)
                 #F[atom_id,:] -= np.einsum('xamk,akm->x',dm_grad_Q_Sinv,self.u2_Q,optimize=True) # no factor of 1/2 because of dQ/dx Q + Q dQ/dx
-                F[atom_id,:] -= np.einsum('xamk,akm->x',grad_Q,uSinvQdm,optimize=True)
+                #F[atom_id,:] -= np.einsum('xamk,akm->x',grad_Q,uSinvQdm,optimize=True)
+                
                 
                 # grad S inv term. This can be sped-up like the SCF term with pre-computation
                 #grad_S = calculateGradOvlp(self.mol,atom_id)
@@ -985,47 +1038,58 @@ class QMSystem:
                 #    av_grad_Q_xpy = np.einsum('xanm,nm->xa',grad_Q,dmxpy)
                 #    av_grad_QQ_2e_c += 4.0*np.einsum('xa,b->xab',av_grad_Q_xpy,av_Q_xpy) + 4.0*np.einsum('a,xb->xab',av_Q_xpy,av_grad_Q_xpy)
                 #
-                F[atom_id,:] -= self.jdrf_pre*np.einsum('xa,a->x',av_grad_Q,av_uQ0) + np.einsum('a,xa->x',av_uQ,av_grad_Q0) 
+                F[atom_id,:] -= self.jdreem_pre*np.einsum('xa,a->x',av_grad_Q,av_uQ0) + np.einsum('a,xa->x',av_uQ,av_grad_Q0) 
                 if self.resp_qmmm.singlet:
                     av_grad_Q_xpy = np.einsum('xanm,nm->xa',grad_Q,dmxpy)
-                    F[atom_id,:] += -self.jdrf_pre*8.0*np.einsum('xa,a->x',av_grad_Q_xpy,av_uQ_xpy) #+ -4.0*np.einsum('a,xa->x',av_uQ_xpy,av_grad_Q_xpy)
+                    F[atom_id,:] += -self.jdreem_pre*8.0*np.einsum('xa,a->x',av_grad_Q_xpy,av_uQ_xpy) #+ -4.0*np.einsum('a,xa->x',av_uQ_xpy,av_grad_Q_xpy)
                 
                 #av_grad_QQ_2e_c *= 0.0
                 #av_grad_QQ_2e_c = 0.5*(av_grad_QQ_2e_c + av_grad_QQ_2e_c.transpose(0,2,1))
                 # exchange terms
                 # minus sign is absorbed in "exchange" like term
                 # This can likely be sped-up by absorbing equivalent terms - needs to be assessed carefully!
-                grad_Q_dm = np.einsum('xanm,nl->xaml',grad_Q,dm)
-                grad_Q_dm0 = np.einsum('xanm,ln->xaml',grad_Q,dm0)
+                #grad_Q_dm = np.einsum('xanm,nl->xaml',grad_Q,dm)
+                #grad_Q_dm0 = np.einsum('xanm,ln->xaml',grad_Q,dm0)
+                
                 #av_grad_QQ_2e_x_1 = -0.5 * np.einsum('xaml,blm->xab',grad_Q_dm,Q_dm0,optimize=True) #-0.25 * np.einsum('xbml,alm->xab',grad_Q_dm,Q_dm0)
                 #av_grad_QQ_2e_x_1 += -0.5 * np.einsum('aml,xblm->xab',Q_dm,grad_Q_dm0,optimize=True) #-0.25 * np.einsum('bml,xalm->xab',Q_dm,grad_Q_dm0)  
                 #av_grad_QQ_2e_x_1 += -0.125 * np.einsum('xaml,blm->xab',grad_Q_dm0,Q_dm) -0.125 * np.einsum('xbml,alm->xab',grad_Q_dm0,Q_dm)
                 #av_grad_QQ_2e_x_1 += -0.125 * np.einsum('aml,xblm->xab',Q_dm0,grad_Q_dm) -0.125 * np.einsum('bml,xalm->xab',Q_dm0,grad_Q_dm)  
-                F[atom_id,:] -= -0.5 *self.kdrf_pre* np.einsum('xaml,alm->x',grad_Q_dm,uQ_dm0,optimize=True)
-                F[atom_id,:] -= -0.5 *self.kdrf_pre* np.einsum('aml,xalm->x',uQ_dm,grad_Q_dm0,optimize=True)
+                #F[atom_id,:] -= -0.5 *self.kdreem_pre* np.einsum('xaml,alm->x',grad_Q_dm,uQ_dm0,optimize=True)
+                #F[atom_id,:] -= -0.5 *self.kdreem_pre* np.einsum('aml,xalm->x',uQ_dm,grad_Q_dm0,optimize=True)
+                
+                #F[atom_id,:] -= -1.0 *self.kdreem_pre* np.einsum('xanm,anm->x',grad_Q,dm_uQ_dm0,optimize=True)
+                #F[atom_id,:] -= -0.5 *self.kdreem_pre* np.einsum('anm,xanm->x',dm0_uQ_dm,grad_Q,optimize=True)
+                
                     
-                    
-                grad_Q_xpy = np.einsum('xanm,ln->xaml',grad_Q,(dmxpy),optimize=True)
-                grad_Q_xpy_xpyT = np.einsum('xanm,nl->xaml',grad_Q,(dmxpy+dmxpy.T),optimize=True)
+                #grad_Q_xpy = np.einsum('xanm,ln->xaml',grad_Q,(dmxpy),optimize=True)
+                #grad_Q_xpy_xpyT = np.einsum('xanm,nl->xaml',grad_Q,(dmxpy+dmxpy.T),optimize=True)
                 #av_grad_QQ_2e_x_2 = -0.5 * (np.einsum('xaml,blm->xab',grad_Q_xpy,Q_xpy_xpyT) + np.einsum('xbml,alm->xab',grad_Q_xpy,Q_xpy_xpyT) )
                 #av_grad_QQ_2e_x_2 += -0.5 * (np.einsum('aml,xblm->xab',Q_xpy,grad_Q_xpy_xpyT) + np.einsum('bml,xalm->xab',Q_xpy,grad_Q_xpy_xpyT) )
                 #av_grad_QQ_2e_x_2 = -1.0* (np.einsum('xaml,blm->xab',grad_Q_xpy,Q_xpy_xpyT,optimize=True) )
                 #av_grad_QQ_2e_x_2 += -1.0 * (np.einsum('aml,xblm->xab',Q_xpy,grad_Q_xpy_xpyT,optimize=True)  )
-                F[atom_id,:] -= -self.kdrf_pre* (np.einsum('xaml,alm->x',grad_Q_xpy,uQ_xpy_xpyT,optimize=True) )
-                F[atom_id,:] -= -self.kdrf_pre* (np.einsum('aml,xalm->x',uQ_xpy,grad_Q_xpy_xpyT,optimize=True)  )
+                #F[atom_id,:] -= -self.kdreem_pre* (np.einsum('xaml,alm->x',grad_Q_xpy,uQ_xpy_xpyT,optimize=True) )
+                #F[atom_id,:] -= -self.kdreem_pre* (np.einsum('aml,xalm->x',uQ_xpy,grad_Q_xpy_xpyT,optimize=True)  )
                 
-                grad_Q_xmy = np.einsum('xanm,ln->xaml',grad_Q,(dmxmy),optimize=True)
-                grad_Q_xmy_xmyT = np.einsum('xamn,nl->xaml',grad_Q,(dmxmy-dmxmy.T),optimize=True)
+                #F[atom_id,:] -= -1.0*self.kdreem_pre* np.einsum('xanm,anm->x',grad_Q,xpy_uQ_xpy_xpyT+xpy_xpyT_uQ_xpy,optimize=True)
+                #F[atom_id,:] -= -1.0*self.kdreem_pre* np.einsum('xanm,anm->x',grad_Q,xpy_xpyT_uQ_xpy,optimize=True)
+                
+                
+                #grad_Q_xmy = np.einsum('xanm,ln->xaml',grad_Q,(dmxmy),optimize=True)
+                #grad_Q_xmy_xmyT = np.einsum('xamn,nl->xaml',grad_Q,(dmxmy-dmxmy.T),optimize=True)
                 #av_grad_QQ_2e_x_3 = -0.5 * (np.einsum('xaml,blm->xab',grad_Q_xmy,Q_xmy_xmyT) + np.einsum('xbml,alm->xab',grad_Q_xmy,Q_xmy_xmyT) )
                 #av_grad_QQ_2e_x_3 += -0.5 * (np.einsum('aml,xblm->xab',Q_xmy,grad_Q_xmy_xmyT) + np.einsum('bml,xalm->xab',Q_xmy,grad_Q_xmy_xmyT) )
                 #av_grad_QQ_2e_x_3 = -1.0 * (np.einsum('xaml,blm->xab',grad_Q_xmy,Q_xmy_xmyT) + np.einsum('aml,xblm->xab',Q_xmy,grad_Q_xmy_xmyT) )
-                F[atom_id,:] -= -self.kdrf_pre* (np.einsum('xaml,alm->x',grad_Q_xmy,uQ_xmy_xmyT,optimize=True) + np.einsum('aml,xalm->x',uQ_xmy,grad_Q_xmy_xmyT,optimize=True) )
+                #F[atom_id,:] -= -self.kdreem_pre* (np.einsum('xaml,alm->x',grad_Q_xmy,uQ_xmy_xmyT,optimize=True) )
+                #F[atom_id,:] -= -self.kdreem_pre*  np.einsum('aml,xalm->x',uQ_xmy,grad_Q_xmy_xmyT,optimize=True) 
+                #F[atom_id,:] -= -1.0*self.kdreem_pre* np.einsum('xanm,anm->x',grad_Q,xmy_uQ_xmy_xmyT+xmy_xmyT_uQ_xmy,optimize=True)
+                F[atom_id,:] -= np.einsum('xamk,akm->x',grad_Q,dmeff,optimize=True)
                 #av_grad_QQ_2e_x =  (av_grad_QQ_2e_x_1 + av_grad_QQ_2e_x_2 + av_grad_QQ_2e_x_3)
                 #av_grad_QQ_2e_x =  (  av_grad_QQ_2e_x_3)
                 # combine the 2e terms
-                #av_grad_QQ_2e =  self.kdrf_pre*av_grad_QQ_2e_x
+                #av_grad_QQ_2e =  self.kdreem_pre*av_grad_QQ_2e_x
                 
-                    
+                #F[atom_id,:] -= (-1.0*self.kdreem_pre)*np.einsum('xanm,anm->x',grad_Q,dmeff,optimize=True)
                 #F[atom_id,:] -= np.einsum('ab,xab->x',self.u_2,av_grad_QQ_2e)
         
         
@@ -1065,12 +1129,12 @@ class QMSystem:
         if dm.shape[0] == 1:
             av_QQ_2e_x = 0.5 * av_QQ_2e_x
         
-        av_QQ_2e = self.jdrf_pre*av_QQ_2e_c - self.kdrf_pre*av_QQ_2e_x
+        av_QQ_2e = self.jdreem_pre*av_QQ_2e_c - self.kdreem_pre*av_QQ_2e_x
         self.dm_Q = dm_Q
         if comb_coulexch:
             return av_Q, av_QQ_1e, av_QQ_2e
         else:
-            return av_Q, av_QQ_1e, self.jdrf_pre*av_QQ_2e_c, self.kdrf_pre*av_QQ_2e_x
+            return av_Q, av_QQ_1e, self.jdreem_pre*av_QQ_2e_c, self.kdreem_pre*av_QQ_2e_x
     
     def getExchRepHamiltonian(self,mol=None):
         '''
@@ -1155,24 +1219,28 @@ class QMSystem:
         if mol is None:
             mol = self.mol
         grad_h_exchrep_A = self.getExchRepDerivQMHamilontian(A,mol=mol)
-        F = - np.einsum('xnm,nm->x',grad_h_exchrep_A,dm,optimize=True)
+        if not hasattr(self,'dexchrep_einpath'):
+            self.dexchrep_einpath = np.einsum_path('xnm,nm->x',grad_h_exchrep_A,dm,optimize="optimal")[0]
+        #F = - np.einsum('xnm,nm->x',grad_h_exchrep_A,dm,optimize=self.dexchrep_einpath)
         #F = - np.einsum('xnm,nm->x',grad_h_exchrep_A,dm)
-        return F
+        return -np.einsum('xnm,nm->x',grad_h_exchrep_A,dm,optimize=self.dexchrep_einpath)
     
     def getExchRepForceMM(self,dm,B,mol=None):
         if mol is None:
             mol = self.mol
         grad_h_exchrep_B = self.getExchRepDerivMMHamilontian(B,mol=mol)
-        F = - np.einsum('xnm,nm->x',grad_h_exchrep_B,dm,optimize=True)
+        if not hasattr(self,'dexchrep_einpath'):
+            self.dexchrep_einpath = np.einsum_path('xnm,nm->x',grad_h_exchrep_B,dm,optimize="optimal")[0]
+        #F = - np.einsum('xnm,nm->x',grad_h_exchrep_B,dm,optimize=self.dexchrep_einpath)
         #F = - np.einsum('xnm,nm->x',grad_h_exchrep_B,dm)
-        return F
+        return  -np.einsum('xnm,nm->x',grad_h_exchrep_B,dm,optimize=self.dexchrep_einpath)
     
     def getInteractionEnergyDecomposition(self,print_decomp=False):
         
         
         int_energies={}
         # get mean multipoles
-        if self.int_method == "drf":
+        if self.int_method == "dreem":
             av_Q, av_QQ_1e, av_QQ_2e_c, av_QQ_2e_x = self.getMeanMultipoles(comb_coulexch=False)
             av_Q_av_Q = np.outer(av_Q,av_Q)
             dQ_dQ_1e =  av_QQ_1e - av_Q_av_Q
@@ -1223,7 +1291,7 @@ class QMSystem:
             if print_decomp : print(E_pol_1efluct_atm)
             if print_decomp : print("Total 1e fluct polarization embedding energy [AU]:",np.sum(E_pol_1efluct))
             
-            if print_decomp : print("Total DRF energy [AU]:",np.sum(E_pol)+np.sum(E_static))
+            if print_decomp : print("Total dreem energy [AU]:",np.sum(E_pol)+np.sum(E_static))
             int_energies["static"] = E_static_atm
             int_energies["pol"] = E_pol_atm
             int_energies["pol_mf"]=E_pol_mf_atm

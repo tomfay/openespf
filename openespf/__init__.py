@@ -2,6 +2,7 @@ from .QMMMSystem import QMMMSystem
 from .QMSystem import QMSystem
 from .MMSystem import MMSystem
 from .Data import *
+#import .MultipoleForceExtras as MultipoleForceExtras
 #from .QMMultipole import QMMultipole
 
 # Package metadata

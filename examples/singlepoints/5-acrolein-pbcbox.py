@@ -29,7 +29,7 @@ positions = modeller.getPositions()
 forcefield = ForceField("5-inputs/h2o.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=PME,nonbondedCutoff=1.0*nanometer)
 #system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
-platform = Platform.getPlatformByName("OpenCL")
+platform = Platform.getPlatformByName("CPU")
 integrator = VerletIntegrator(1e-16*picoseconds)
 simulation = Simulation(topology, system, integrator,platform)
 simulation.context.setPositions(positions)
@@ -65,6 +65,7 @@ qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole
 # set additional parameters for the exchange repulsion + damping of electrostatics
 qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info=None)
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
+qmmm_system.mm_system.use_prelim_mpole = False # default is False
 
 # get positions for the QM and MM atoms
 mm_positions = simulation.context.getState(getPositions=True).getPositions(asNumpy=True)._value
@@ -95,6 +96,7 @@ print("E(QM/MM) terms = ", E_qmmm_terms)
 E_qmmm = np.sum(np.array([E_qmmm_terms[k] for k in list(E_qmmm_terms.keys())]))
 print("E(QM/MM) = ",E_qmmm)
 print("E(QM/MM) - E(QM) - E(MM) = ",E_qmmm - E_qmmm_0)
+#np.savetxt('./5-inputs/energies-prelim.dat',np.array([E_qmmm,E_qmmm_0,E_qmmm-E_qmmm_0]),header='E_QMMM,E_QM+E_MM,Interaction [Hartree]')
 
 # The dipole moment of the QM system can be accessed as follows, as expected it is polarised relative to the vacuum
 dipole_aq = qmmm_system.qm_system.mf_qmmm.dip_moment()

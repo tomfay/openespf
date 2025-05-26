@@ -4,21 +4,23 @@ The QMMMSystem object handles all energy+force evaluations for the full QM/MM sy
 
 from .MMSystem import MMSystem
 from .QMSystem import QMSystem
+from .MultipoleForceExtras import getDist, getNearestImages
 from pyscf import gto
+from pyscf import data
 from scipy.optimize import fsolve
 import numpy as np
 from timeit import default_timer as timer
 
 class QMMMSystem:
     '''
-    The QMMMSystem wraps all of the methods for calculating energy and forces with the ESPF-DRF, ESPF-MFPol and ESPF-EE 
-    methods. 
+    The QMMMSystem wraps all of the methods for calculating energy and forces with the DREEM
+    methoDREEMd. 
 
     All quantities are in atomic units.
     '''
     
     
-    def __init__(self,mm_simulation,qm_scf,qm_resp=None,int_method="drf",rep_method="exch",multipole_order=0,multipole_method="espf"):
+    def __init__(self,mm_simulation,qm_scf,qm_resp=None,int_method="dreem",rep_method="exch",multipole_order=0,multipole_method="espf"):
         
         # interaction methods
         self.int_method = int_method
@@ -46,6 +48,12 @@ class QMMMSystem:
         
         # resp state properties/forces default value
         self.resp_states = [1]
+        
+        # use WCA repulsion
+        self.use_wca = False
+        
+        # use pre-lim cl force
+        self.use_prelim_cl_force = None # None defaults to whatever the mm system does
         
         return
     
@@ -79,7 +87,7 @@ class QMMMSystem:
         return
     
     def getPositions(self,enforce_pbc=False):
-        if not enforce_pbc:
+        if (not enforce_pbc) or (self.pbc_dims is None):
             return self.qm_positions, self.mm_positions
         else:
             x_qm = self.enforcePBC(self.qm_positions)
@@ -95,7 +103,7 @@ class QMMMSystem:
         
         
         # get the MM system energy terms
-        if self.int_method in ["drf","mf"] :
+        if self.int_method in ["dreem","mf"] :
             # get a dictionary of polarization energy resps
             start = timer()
             pol_resp = self.mm_system.getPolarizationEnergyResp(self.qm_positions,self.multipole_order,position_units="Bohr")
@@ -114,7 +122,7 @@ class QMMMSystem:
         # set up a dictionary for decomposition of the energy terms
         energy_terms = {} 
         # get the MM energy
-        if self.int_method == "drf":
+        if self.int_method == "dreem":
             energy_terms["mm electrostatics"] = pol_resp["U_0"]
         else:
             energy_terms["mm electrostatics"] = self.mm_system.getElectrostaticEnergy()
@@ -124,8 +132,16 @@ class QMMMSystem:
         if self.print_info : print("MM energy time:",end-start,"s")
         # get the QM + interaction energy 
         # TODO - modify to deal with multiple energies from excited states possibly return a list of dictionaries, one for each state
+        
+        
+        if self.use_wca:
+            start = timer()
+            energy_terms["wca"] = self.getWCARepulsion(get_force=False)
+            if self.print_info : print("WCA repulsion:",timer()-start,"s")
         start = timer()
         qm_energy_terms = self.qm_system.getEnergy(return_terms=True)
+        
+        
         
         if type(qm_energy_terms) is type([]):
             energy_terms = [{ **energy_terms, **state_energy_terms} for state_energy_terms in qm_energy_terms]
@@ -133,6 +149,9 @@ class QMMMSystem:
             energy_terms = { **energy_terms, **qm_energy_terms}
         end = timer()
         if self.print_info : print("QM energy time:",end-start,"s")
+        
+        
+            
         
         # return the energy
         if return_terms:
@@ -150,7 +169,7 @@ class QMMMSystem:
         
         
         # get the MM system energy terms
-        if self.int_method in ["drf","mf"] :
+        if self.int_method in ["dreem","mf"] :
             # get a dictionary of polarization energy resps
             start = timer()
             pol_resp = self.mm_system.getPolarizationEnergyForceResp(self.qm_positions,self.multipole_order,position_units="Bohr")
@@ -169,13 +188,18 @@ class QMMMSystem:
         force_terms_mm = {}
         force_terms_qm = {}
         # get the MM energy
-        if self.int_method == "drf":
+        if self.int_method == "dreem":
             energy_terms["mm electrostatics"] = pol_resp["U_0"]
             force_terms_mm["mm electrostatics"] = pol_resp["F_0_mm"]
             force_terms_qm["mm electrostatics"] = pol_resp["F_0_qm"]
         else:
             energy_terms["mm electrostatics"],force_terms_mm["mm electrostatics"] = self.mm_system.getElectrostaticEnergyForces()
             force_terms_qm["mm electrostatics"] = np.zeros(self.qm_positions.shape)
+        if self.use_wca:
+            start = timer()
+            energy_terms["wca"],force_terms_qm["wca"],force_terms_mm["wca"] = self.getWCARepulsion(get_force=True)
+            if self.print_info : print("WCA repulsion:",timer()-start,"s")
+            
         start = timer()
         #E_mm,F_mm = self.mm_system.getEnergyForces(terms="remainder")
         E_mm,F_mm = self.mm_system.getEnergyForces()
@@ -366,7 +390,7 @@ class QMMMSystem:
     
     def getClassicalIntForce(self,qq,q,pol_resp):
         '''
-        This returns the classical portion DRF interaction force
+        This returns the classical portion dreem interaction force
         qq is the symmetrised <q_a q_b> matrix and q is <q_a> for the QM region
         '''
         
@@ -388,14 +412,23 @@ class QMMMSystem:
                     dipoles = (vq[N_QM:(4*N_QM),n].reshape((3,N_QM))).T
                 else:
                     dipoles = None
-                F_qm_n, F_mm_n = self.mm_system.getProbeForces(self.qm_positions,charges,probe_dipoles=dipoles)
+                F_qm_n, F_mm_n = self.mm_system.getProbeForces(self.qm_positions,charges,probe_dipoles=dipoles,use_prelim_mpole=self.use_prelim_cl_force)
                 F_qm += wq[n] * F_qm_n
                 F_mm += wq[n] * F_mm_n
         
         # add correction for the linear terms
-        q_corr = q - np.einsum('n,an->a',wq,vq)
-        F_qm += np.einsum('kxa,a->kx',pol_resp["F_1_qm"],q_corr)
-        F_mm += np.einsum('kxa,a->kx',pol_resp["F_1_mm"],q_corr)
+        
+        if self.mm_system.damp_perm:
+            F_qm += np.einsum('kxa,a->kx',pol_resp["F_1_qm"],q,optimize=True)
+            F_mm += np.einsum('kxa,a->kx',pol_resp["F_1_mm"],q,optimize=True)
+            q_corr = - np.einsum('n,an->a',wq,vq)
+            F_qm += np.einsum('kxa,a->kx',pol_resp["F_1_qm_uncorr"],q_corr,optimize=True)
+            F_mm += np.einsum('kxa,a->kx',pol_resp["F_1_mm_uncorr"],q_corr,optimize=True)
+        else:
+            q_corr = q - np.einsum('n,an->a',wq,vq)
+            F_qm += np.einsum('kxa,a->kx',pol_resp["F_1_qm"],q_corr,optimize=True)
+            F_mm += np.einsum('kxa,a->kx',pol_resp["F_1_mm"],q_corr,optimize=True)
+        
         
         # add correction for the zero order term
         sum_wq = np.sum(wq)
@@ -403,3 +436,70 @@ class QMMMSystem:
         F_mm += (-sum_wq) * pol_resp["F_0_mm"]
         
         return F_qm, F_mm
+    
+    def setupWCARepulsion(self,radius_type="vdw",gamma=0.6,R0=0.,epsilon=1.0e-3):
+        '''
+        Sets up parameters for adding WCA repulsion
+        sigma parameter is:
+        sigma_AB = gamma * (R_QM_A + R_MM_B) + R0
+        '''
+        self.use_wca = True
+        self.wca_gamma = gamma
+        self.wca_R0 = R0
+        self.wca_epsilon = epsilon
+        
+
+        self.wca_R_MM = []
+        Z_QM = self.qm_system.mol.atom_charges()
+        
+        Z_MM = [a.element.atomic_number for a in self.mm_system.simulation.topology.atoms()]
+        if radius_type == "vdw":
+            self.wca_R_QM = self.wca_gamma * data.radii.VDW[Z_QM] + self.wca_R0*0.5
+            self.wca_R_MM = self.wca_gamma * data.radii.VDW[Z_MM] + self.wca_R0*0.5
+        elif radius_type == "vdw":
+            self.wca_R_QM = self.wca_gamma * data.radii.COVALENT[Z_QM] + self.wca_R0*0.5
+            self.wca_R_MM = self.wca_gamma * data.radii.COVALENT[Z_MM] + self.wca_R0*0.5
+        
+        self.wca_R_cut_QM = (2.0**(1.0/6.0)) * self.wca_R_QM
+        self.wca_R_cut_MM = (2.0**(1.0/6.0)) * self.wca_R_MM
+        return
+    
+    def getWCARepulsion(self,get_force=False):
+        
+        E_rep = 0.
+        if get_force:
+            F_rep_QM = np.zeros(self.qm_positions.shape)
+            F_rep_MM = np.zeros(self.mm_positions.shape)
+        n_added = 0
+        for A in range(0,self.qm_positions.shape[0]):
+            R_A = self.qm_positions[A,:]
+            # get R_B-R_A for nearest images of each MM atom
+            dR = getNearestImages(self.mm_positions,R_A,pbc=self.pbc_dims)
+            r = np.linalg.norm(dR,axis=1)
+            r_cut = self.wca_R_cut_QM[A] + self.wca_R_cut_MM
+            inds = np.where(r<r_cut)[0]
+            
+            if len(inds)>0:
+                n_added += len(inds)
+                sigma = self.wca_R_QM[A] + self.wca_R_MM[inds]
+                y = sigma/r[inds]
+                y6 = y * y  # (sigma/r)^2
+                y6 = y6 * y6 * y6  # (sigma/r)^6
+                y12 = y6 * y6
+                E_reps = (4.0*self.wca_epsilon) *(y12-y6) + self.wca_epsilon
+                E_rep += np.sum(E_reps)
+                #print(inds.shape,E_reps.shape)
+                
+                if get_force:
+                    F_reps = ((4.0*self.wca_epsilon) * (12.0*y12-6.0*y6) * (y/(sigma*r[inds])))[:,None] * (dR[inds,:])
+                    #print(F_reps.shape)
+                    F_rep_MM[inds,:] += F_reps
+                    F_rep_QM[A,:] -= np.sum(F_reps,axis=0)
+        
+        if n_added>0:
+            print("Number of WCA repulsion terms added:",n_added)
+        if get_force:
+            return E_rep, F_rep_QM, F_rep_MM
+        else:
+            return E_rep
+                              

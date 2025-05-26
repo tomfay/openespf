@@ -24,15 +24,15 @@ import matplotlib.pyplot as plt
 
 # set up the Pyscf QM system using HF/cc-pVDZ
 mol = gto.M(atom='Na 0 0 0',unit="Bohr",basis="cc-pVDZ",charge=1)
-mf = scf.RHF(mol).density_fit()
+mf = scf.RHF(mol)
 
 # Get info MM He system and set up the OpenMM simulation object
 pdb = PDBFile("1-inputs/he.pdb")
 topology = pdb.getTopology() 
 positions = pdb.getPositions()
-forcefield = ForceField("1-inputs/he.xml")
+forcefield = ForceField("1-inputs/he_charge.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
-platform = Platform.getPlatformByName("CPU")
+platform = Platform.getPlatformByName("Reference")
 integrator = VerletIntegrator(1e-16*picoseconds)
 simulation = Simulation(topology, system, integrator,platform)
 simulation.context.setPositions(positions)
@@ -46,7 +46,7 @@ rep_type_info = [{"N_eff":2.0,"R_dens":1.34*Data.ANGSTROM_TO_BOHR,"rho(R_dens)":
 mm_rep_types = [0]
 rep_cutoff = 20.
 # information about how the QM multipole - MM induced dipole interactions are damped (OpenMM units)
-qm_damp = [0.0001**(1./6.)]*len(mol.atom_charges())
+qm_damp = [0.001**(1./6.)]*len(mol.atom_charges())
 qm_thole = [0.39]*len(mol.atom_charges())
 
 # create the QMMMSystem object that performs the QM/MM energy calculations
@@ -54,8 +54,12 @@ qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole
 # set additional parameters for the exchange repulsion + damping of electrostatics
 qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info=None)
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
-qmmm_system.mm_system.use_prelim_mpole = False
-qmmm_system.mm_system.resp_mode_force = "linear"
+#qmmm_system.mm_system.use_prelim_mpole = False # default False
+#qmmm_system.use_prelim_cl_force = False
+#qmmm_system.mm_system.prelim_dr = 1.0e-2 # default 1.0e-2
+#qmmm_system.mm_system.resp_mode_force = "linear"
+qmmm_system.mm_system.damp_perm = True
+
 
 # get positions for the QM and MM atoms
 mm_positions = simulation.context.getState(getPositions=True).getPositions()
@@ -76,7 +80,7 @@ dm = mf.make_rdm1()
 qmmm_system.qm_system.dm_guess = dm
 
 # set up a grid of separations in atomic units
-R_vals = np.linspace(6.,2.0,num=50) * Data.ANGSTROM_TO_BOHR
+R_vals = np.linspace(6.,1.75,num=100) * Data.ANGSTROM_TO_BOHR
 energies = np.zeros(R_vals.shape)
 forces_qm = np.zeros((R_vals.shape[0],qm_positions.shape[0],3))
 forces_mm = np.zeros((R_vals.shape[0],1,3))
@@ -107,6 +111,13 @@ for n in range(2,N_R-2):
 f_num_4 *= -(1.0/dR)
 f_num_4[0:2] = np.nan
 f_num_4[[N_R-2,N_R-1]] = np.nan
+
+#np.savetxt("./1-inputs/output-prelim.dat",np.hstack((R_vals[2:-2,None],energies[2:-2,None],f_num_4[2:-2,None],-forces_qm[2:-2,0,:],forces_mm[2:-2,0,:])),header="R [Bohr],Energy [au],Numerical force[au],-F_QM[au],F_MM[au]")
+
+print("QM-num differnce:")
+print(f_num_4[2:-2]+forces_qm[2:-2,0,0])
+print("MM-num differnce:")
+print(f_num_4[2:-2]-forces_mm[2:-2,0,0])
 
 # plot energies and model -α/2R^4 expected at long range
 plt.plot(R_vals[2:-2]*Data.BOHR_TO_ANGSTROM,(f_num_4[2:-2])*1e3,label="Numerical forces")

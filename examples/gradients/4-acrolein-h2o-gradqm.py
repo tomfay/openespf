@@ -22,10 +22,11 @@ import matplotlib.pyplot as plt
 
 
 # set up the Pyscf QM system u
-mol = gto.M(atom="4-inputs/acrolein.xyz",unit="Angstrom",basis="pc-0",charge=0)
+mol = gto.M(atom="4-inputs/acrolein.xyz",unit="Angstrom",basis="STO-3G",charge=0)
 # The DFT method is chosen to be a long-range-corrected functional with density fitting
 mf = dft.RKS(mol)
 mf.xc = "PBE0"
+mf.conv_tol = 1.0e-12
 #mf = mf.density_fit(auxbasis="weigendjkfit")
 
 
@@ -33,9 +34,9 @@ mf.xc = "PBE0"
 pdb = PDBFile("4-inputs/h2o.pdb")
 topology = pdb.getTopology() 
 positions = pdb.getPositions()
-forcefield = ForceField("3-inputs/h2o.xml")
+forcefield = ForceField("amoeba2018.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
-platform = Platform.getPlatformByName("CPU")
+platform = Platform.getPlatformByName("Reference")
 integrator = VerletIntegrator(1e-16*picoseconds)
 simulation = Simulation(topology, system, integrator,platform)
 simulation.context.setPositions(positions)
@@ -85,7 +86,7 @@ dm = mf.make_rdm1()
 # position of H-O-H H atom in nm
 R_HOH = np.array([0.25,0,0])
 # set up a grid of separations in nanometres units
-R_vals = np.linspace(0.5,-0.5,num=7) * 0.025
+R_vals = np.linspace(0.5,-0.5,num=21) * 0.01
 energies = np.zeros((3,R_vals.shape[0]))
 forces_qm = np.zeros((3,R_vals.shape[0],qm_positions.shape[0],3))
 forces_mm = np.zeros((3,R_vals.shape[0],mm_positions_ref.shape[0],3))
@@ -139,6 +140,10 @@ for f in forces_num:
 print("Analytical forces") 
 for f in forces_an:
     print(f[2:-2])   
+    
+#for x in range(0,3):
+#    np.savetxt("./4-inputs/output-"+str(x)+".dat",np.hstack((R_vals[2:-2,None],energies[x,2:-2,None],forces_num[x][2:-2,None],forces_an[x][2:-2,None])),header="R [Bohr],Energy [au],Numerical force[au],Analytical force[au]")
+
 # plot energies 
 axes = {0:"x",1:"y",2:"z"}
 for x in range(0,3):

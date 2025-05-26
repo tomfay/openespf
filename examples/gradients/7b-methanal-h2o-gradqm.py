@@ -25,18 +25,22 @@ import matplotlib.pyplot as plt
 
 
 # set up the Pyscf QM system u
-mol = gto.M(atom="7-inputs/methanal.xyz",unit="Angstrom",basis="6-31G",charge=0)
+mol = gto.M(atom="7-inputs/methanal.xyz",unit="Angstrom",basis="6-31G*",charge=0,spin=2)
 # The DFT method is chosen to be a long-range-corrected functional with density fitting
-mf = dft.UKS(mol)
+mf = dft.ROKS(mol)
+mf.xc = "HF"
+mol = gto.M(atom="7-inputs/methanal.xyz",unit="Angstrom",basis="6-31G*",charge=0,spin=0)
+mf = dft.RKS(mol)
 mf.xc = "HF"
 #mf = mf.density_fit(auxbasis="weigendjkfit")
+mf.conv_tol = 1.0e-12
 
 
 # Get info MM He system and set up the OpenMM simulation object
 pdb = PDBFile("7-inputs/h2o.pdb")
 topology = pdb.getTopology() 
 positions = pdb.getPositions()
-forcefield = ForceField("7-inputs/h2o.xml")
+forcefield = ForceField("amoeba2018.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
 platform = Platform.getPlatformByName("Reference")
 integrator = VerletIntegrator(1e-16*picoseconds)
@@ -63,8 +67,12 @@ qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
 
 qmmm_system.mm_system.use_prelim_mpole = False # set to true to use pre-limit form of dipoles in the energy expansion
-qmmm_system.mm_system.prelim_dr = 5.0e-3 # default value is 1.0e-2
+#qmmm_system.mm_system.prelim_dr = 5.0e-1*Data.BOHR_TO_NM # default value is 1.0e-1 Bohr
 qmmm_system.mm_system.resp_mode_force = "linear"
+qmmm_system.mm_system.damp_perm = True
+
+#qmmm_system.qm_system.multipole.espf_reg_type = "mulliken"
+#qmmm_system.qm_system.multipole.espf_reg_param = 1.0e-8
 
 # get positions for the QM and MM atoms
 mm_positions_ref = simulation.context.getState(getPositions=True).getPositions(asNumpy=True)._value
@@ -89,11 +97,11 @@ dm = mf.make_rdm1()
 # set as initial guess for QM/MM calculation (not required!)
 #qmmm_system.qm_system.dm_guess = dm
 
-J = 1
+J = 1 # QM atom to move
 # position of H-O-H H atom in nm
 R_HOH = np.array([0.25,0,0])
 # set up a grid of separations in nanometres units
-R_vals = np.linspace(0.5,-0.5,num=7) * 0.025
+R_vals = np.linspace(0.5,-0.5,num=21) * 0.01
 energies = np.zeros((3,R_vals.shape[0]))
 forces_qm = np.zeros((3,R_vals.shape[0],qm_positions.shape[0],3))
 forces_mm = np.zeros((3,R_vals.shape[0],mm_positions_ref.shape[0],3))
@@ -140,14 +148,24 @@ for x in range(0,3):
     forces_num.append(f_num_4)
     forces_an.append(forces_qm[x,:,J,x])
 
+np.set_printoptions(linewidth=500)
 print("Numerical forces") 
 R_vals_num = R_vals[2:-2]
 for f in forces_num:
-    print(f[2:-2])    
-    
+    print(f[2:-2])     
 print("Analytical forces") 
 for f in forces_an:
     print(f[2:-2])   
+print("Difference forces") 
+for f,f_num in zip(forces_an,forces_num):
+    print(f[2:-2]-f_num[2:-2])   
+print("R_vals")
+print(R_vals_num)
+
+    
+for x in range(0,3):
+    np.savetxt("./7-inputs/output-"+str(x)+"-gradqm.dat",np.hstack((R_vals[2:-2,None],energies[x,2:-2,None],forces_num[x][2:-2,None],forces_an[x][2:-2,None])),header="R [Bohr],Energy [au],Numerical force[au],Analytical force[au]")
+
 # plot energies 
 axes = {0:"x",1:"y",2:"z"}
 for x in range(0,3):

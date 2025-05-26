@@ -18,18 +18,22 @@ import openespf.Data as Data
 import numpy as np
 import matplotlib.pyplot as plt
 
+import cProfile
+
 from timeit import default_timer as timer
 
 
 # Get info MM He system and set up the OpenMM simulation object
-#pdb = PDBFile("6-inputs/acrolein-bigpbcbox.pdb")
-pdb = PDBFile("10-inputs/acetone-waterbox.pdb")
-modeller = Modeller(pdb.getTopology() , pdb.getPositions())
+pdb = PDBFile("./10-inputs/acetone-waterbox.pdb")
+frame=-1
+#pdb = PDBFile("10-inputs/crash-coordinates-local.pdb")
+modeller = Modeller(pdb.getTopology() , pdb.getPositions(frame=frame))
 modeller.delete([r for r in modeller.topology.residues() if r.name == "UNL"])
 positions = modeller.getPositions()
 topology = modeller.getTopology()
 positions = modeller.getPositions()
 forcefield = ForceField("amoeba2018.xml")
+#forcefield = ForceField("7-inputs/h2o.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=PME,nonbondedCutoff=1.0*nanometer)
 #system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
 platform = Platform.getPlatformByName("Reference")
@@ -38,7 +42,7 @@ simulation = Simulation(topology, system, integrator,platform)
 simulation.context.setPositions(positions)
 
 # set up the Pyscf QM system 
-modeller = Modeller(pdb.getTopology() , pdb.getPositions())
+modeller = Modeller(pdb.getTopology() , pdb.getPositions(frame=frame))
 modeller.delete([r for r in modeller.topology.residues() if r.name == "HOH"])
 residue = [r for r in modeller.topology.residues()][0]
 qm_positions = np.array(modeller.getPositions()._value) * 10. # in Angstrom
@@ -48,17 +52,22 @@ with open('./10-inputs/basis_def2svpp.dat', 'r') as f:
     basis_svpp = f.read()
 
 mol = gto.M(atom=atom,unit="Angstrom",basis={"C":"pcseg1","O":"pcseg1","H":"pcseg0"},charge=0,verbose=2)
-mol = gto.M(atom=atom,unit="Angstrom",basis="pcseg-0",charge=0,verbose=2)
+mol = gto.M(atom=atom,unit="Angstrom",basis=basis_svpp,charge=0,verbose=2)
+#mol = gto.M(atom=atom,unit="Angstrom",basis="def2-TZVPP",charge=0,verbose=2)
 auxbasis = "weigendjkfit"
 #auxbasis = df.make_auxbasis(mol)
 #auxbasis = "ccpvdzjkfit"
 # The DFT method is chosen to be ωB97X-D3/def2-SVP
 mf = dft.RKS(mol)
 mf.xc = "PBE0"
+#mf.xc = "B3LYP"
+#mf.xc = "HF"
+mf.verbose = 2
 #mf.xc = "HF,LYP"
 mf.grids.level = 0
 #mf = scf.RHF(mol)
-#mf = mf.density_fit(auxbasis=auxbasis)
+mf = mf.density_fit(auxbasis=auxbasis)
+mf.max_cycle = 120
 
 resp = tdscf.TDA(mf)
 resp.nstates = 3
@@ -66,16 +75,18 @@ resp.singlet = True
 
 
 # information about the QM-MM interaction
-multipole_order = 1 # 0=charges, 1=charges+dipoles for QM ESPF multipole operators
+multipole_order = 0 # 0=charges, 1=charges+dipoles for QM ESPF multipole operators
 multipole_method = "espf" # "espf" or "mulliken" type multipole operators
 # information for the exchange-repulsion model (atomic units)
 rep_type_info = [{"N_eff":4.0+0.669,"R_dens":1.71*Data.ANGSTROM_TO_BOHR,"rho(R_dens)":1.0e-3},
                 {"N_eff":1.0-0.3345,"R_dens":1.54*Data.ANGSTROM_TO_BOHR,"rho(R_dens)":1.0e-3}] 
 rep_type_info = [{"N_eff":4.0+0.51966,"R_dens":(1.71*(1-0.51966)+2.03*0.51966)*Data.ANGSTROM_TO_BOHR,"rho(R_dens)":1.0e-3},
                 {"N_eff":1.0 - 0.51966*0.5,"R_dens":(1.54*(1-0.51966*0.5))*Data.ANGSTROM_TO_BOHR,"rho(R_dens)":1.0e-3}] 
+#rep_type_info = [{"N_eff":4.0+0.51966,"R_dens":(1.71)*Data.ANGSTROM_TO_BOHR,"rho(R_dens)":1.0e-3},
+#                {"N_eff":1.0 - 0.51966*0.5,"R_dens":(1.54)*Data.ANGSTROM_TO_BOHR,"rho(R_dens)":1.0e-3}] 
 rep_type_dict = {"O":0,"H":1}
 mm_rep_types = [rep_type_dict[atom.element.symbol] for atom in topology.atoms()]
-rep_cutoff = 8.
+rep_cutoff = 10.
 # information about how the QM multipole - MM induced dipole interactions are damped (OpenMM units)
 qm_damp_dict = {"H":0.496e-3**(1./6.),"C":1.334e-3**(1./6.),"O":0.873e-3**(1./6.)}
 qm_damp = [qm_damp_dict[atom.element.symbol] for atom in modeller.topology.atoms()]
@@ -83,10 +94,15 @@ qm_damp = [qm_damp_dict[atom.element.symbol] for atom in modeller.topology.atoms
 qm_thole = [0.39]*len(mol.atom_charges())
 
 # create the QMMMSystem object that performs the QM/MM energy calculations
-qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole_method=multipole_method,qm_resp=resp)
+qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole_method=multipole_method,qm_resp=None)
 # set additional parameters for the exchange repulsion + damping of electrostatics
 qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info=None)
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
+qmmm_system.mm_system.damp_perm = True
+#qmmm_system.qm_system.multipole.corr_espf = False
+qmmm_system.qm_system.multipole.espf_reg_type = "none"
+qmmm_system.qm_system.multipole.espf_reg_param = 0.0e-4
+qmmm_system.setupWCARepulsion(radius_type="vdw",gamma=0.7,R0=0.,epsilon=1.0e-1)
 
 # get positions for the QM and MM atoms
 mm_positions = simulation.context.getState(getPositions=True).getPositions(asNumpy=True)._value
@@ -135,9 +151,17 @@ qmmm_system.qm_system.dm_guess = dm
 #qmmm_system.mm_system.resp_mode = "quadratic"
 #E_qmmm,_,_ = qmmm_system.getEnergyForces()
 E_qmmm = qmmm_system.getEnergy()
-print("Excitation energies = ", (E_qmmm[1:]-E_qmmm[0])*Data.HARTREE_TO_EV)
+if qmmm_system.qm_system.resp is not None:
+    print("Excitation energies = ", (E_qmmm[1:]-E_qmmm[0])*Data.HARTREE_TO_EV)
+else:
+    print("QM/MM energies = ", (E_qmmm)*Data.HARTREE_TO_EV)
 print("E(QM/MM) = ",E_qmmm)
 print("E(QM/MM) - E(QM) - E(MM) = ",E_qmmm - E_qmmm_0)
+start = timer()
+if qmmm_system.qm_system.resp is not None:
+    tdm = qmmm_system.qm_system.resp_qmmm.transition_dipole()
+    print("TDM time: ",timer()-start,"s")
+
 
 #qmmm_system.qm_system.resp = None
 # The dipole moment of the QM system can be accessed as follows, as expected it is polarised relative to the vacuum
@@ -149,17 +173,34 @@ print("Magnitude of change in dipole moment = " , np.linalg.norm(dipole_aq-dipol
 qmmm_system.print_info = True
 qmmm_system.qm_system.dm_guess = dm
 start = timer()
-E_qmmm,F_qm,F_mm,F_qm_resp,F_mm_resp = qmmm_system.getEnergyForces()
+qmmm_system.mm_system.resp_mode_force = "quadratic"
+if qmmm_system.qm_system.resp is not None:
+    E_qmmm,F_qm,F_mm,F_qm_resp,F_mm_resp = qmmm_system.getEnergyForces()
+else:
+    E_qmmm,F_qm,F_mm= qmmm_system.getEnergyForces()
 #E_qmmm,F_qm,F_mm = qmmm_system.getEnergyForces()
 print("Quadratic calculation time:", timer()-start, "s")
 print("E(QM/MM) (quadratic) = ", E_qmmm)
 # do the calcualtion with linear scaling forces
-qmmm_system.qm_system.dm_guess = dm
-#qmmm_system.mm_system.resp_mode_force = "linear"
+#qmmm_system.qm_system.dm_guess = dm
+qmmm_system.mm_system.resp_mode_force = "linear"
 start = timer()
-E_qmmm_lin,F_qm_lin,F_mm_lin,F_qm_resp_lin,F_mm_resp_lin = qmmm_system.getEnergyForces()
+if qmmm_system.qm_system.resp is not None:
+    E_qmmm_lin,F_qm_lin,F_mm_lin,F_qm_resp_lin,F_mm_resp_lin = qmmm_system.getEnergyForces()
+else:
+    E_qmmm_lin,F_qm_lin,F_mm_lin= qmmm_system.getEnergyForces()
+    #cProfile.run('E_qmmm_lin,F_qm_lin,F_mm_lin= qmmm_system.getEnergyForces()')
 #E_qmmm_lin,F_qm_lin,F_mm_lin = qmmm_system.getEnergyForces()
 print("Linear calculation time:", timer()-start, "s")
-print("E(QM/MM) (linear) = ", E_qmmm)
 
+print("E(QM/MM) (linear) = ", E_qmmm_lin)
+print("Quadratic-linear energy difference = ", E_qmmm-E_qmmm_lin)
+print("Max Quadratic-linear QM force difference = ")
+print(np.max(np.abs(F_qm-F_qm_lin)))
+print("RMS Quadratic-linear QM force difference = ")
+print(np.sqrt(np.mean((F_qm-F_qm_lin)**2)))
+print("Max Quadratic-linear MM force difference = ")
+print(np.max(np.abs(F_mm-F_mm_lin)))
+print("RMS Quadratic-linear QM force difference = ")
+print(np.sqrt(np.mean((F_mm-F_mm_lin)**2)))
 

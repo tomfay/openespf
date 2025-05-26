@@ -3,6 +3,7 @@
 '''
 An interaction of acrolein and in a droplet of H2O
 CH2=CH-CH=O
+Forces and energies are calcualtion with linear and quadratic N_QM scaling algorithms for the polarization response
 '''
 
 # import pyscf for setting up the QM part of the calculation
@@ -28,8 +29,9 @@ positions = modeller.getPositions()
 topology = modeller.getTopology()
 positions = modeller.getPositions()
 forcefield = ForceField("5-inputs/h2o.xml")
+forcefield = ForceField("amoeba2018.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
-platform = Platform.getPlatformByName("OpenCL")
+platform = Platform.getPlatformByName("Reference")
 integrator = VerletIntegrator(1e-16*picoseconds)
 simulation = Simulation(topology, system, integrator,platform)
 simulation.context.setPositions(positions)
@@ -40,15 +42,16 @@ modeller.delete([r for r in modeller.topology.residues() if r.name == "HOH"])
 residue = [r for r in modeller.topology.residues()][0]
 qm_positions = np.array(modeller.getPositions()._value) * 10. # in Angstrom
 atom =  [[atom.element.symbol , qm_positions[n,:]] for n,atom in enumerate(residue.atoms())] 
-mol = gto.M(atom=atom,unit="Angstrom",basis="def2-SVP",charge=0)
-# The DFT method is chosen to be ωB97X-D3/def2-SVP
+mol = gto.M(atom=atom,unit="Angstrom",basis="pc-0",charge=0)
+# The DFT method is chosen to be HF/def2-SVP
 mf = dft.RKS(mol)
-mf.xc = "PBE0"
+mf.xc = "HF"
+mf.conv_tol = 1.0e-12
 #mf = mf.density_fit()
 
 
 # information about the QM-MM interaction
-multipole_order = 1 # 0=charges, 1=charges+dipoles for QM ESPF multipole operators
+multipole_order = 0 # 0=charges, 1=charges+dipoles for QM ESPF multipole operators
 multipole_method = "espf" # "espf" or "mulliken" type multipole operators
 # information for the exchange-repulsion model (atomic units)
 rep_type_info = [{"N_eff":4.0+0.669,"R_dens":1.71*Data.ANGSTROM_TO_BOHR,"rho(R_dens)":1.0e-3},
@@ -88,11 +91,24 @@ dm = mf.make_rdm1()
 qmmm_system.qm_system.dm_guess = dm
 
 # Do the QM/MM calculation
+qmmm_system.mm_system.resp_mode_force = "quadratic" # use the quadratic scaling energy/force algorithm
 E_qmmm,F_qm,F_mm = qmmm_system.getEnergyForces()
 print("E(QM/MM) = ",E_qmmm)
 print("E(QM/MM) - E(QM) - E(MM) = ",E_qmmm - E_qmmm_0)
-qmmm_system.mm_system.resp_mode_force = "linear"
+
+qmmm_system.mm_system.resp_mode_force = "linear" # use the linear scaling energy/force algorithm
 E_qmmm_lin,F_qm_lin,F_mm_lin = qmmm_system.getEnergyForces()
 print("Quadratic-linear energy difference = ", E_qmmm-E_qmmm_lin)
 print("Quadratic-linear QM force difference = ")
 print(F_qm-F_qm_lin)
+dF_qm = F_qm-F_qm_lin
+print(np.max(np.abs(dF_qm)))
+print(np.sqrt(np.mean(dF_qm*dF_qm,axis=0)))
+print("Quadratic-linear MM force difference = ")
+dF_mm = F_mm-F_mm_lin
+print(np.max(np.abs(dF_mm)))
+print(np.sqrt(np.mean(dF_mm*dF_mm,axis=0)))
+
+#np.savetxt('./5-inputs/output-energies.dat',np.array([E_qmmm_lin,E_qmmm]),header="E_QMMM_lin,E_QMMM_quad")
+#np.savetxt('./5-inputs/output-forces-qm.dat',np.hstack((F_qm_lin,F_qm)),header="F_QM_lin,F_QM_quad")
+#np.savetxt('./5-inputs/output-forces-mm.dat',np.hstack((F_mm_lin,F_mm)),header="F_MM_lin,F_MM_quad")
