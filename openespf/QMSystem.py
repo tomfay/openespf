@@ -1,4 +1,4 @@
-from pyscf import gto, scf, dft, tddft, ao2mo, lib, grad, dispersion
+from pyscf import gto, scf, dft, tddft, ao2mo, lib, grad
 from pyscf.dft import numint
 import numpy as np
 from scipy.linalg import sqrtm, inv, solve

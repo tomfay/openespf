@@ -40,7 +40,7 @@ mf.xc = "HF"
 mf.conv_tol = 1.0e-12
 mf.max_cycle = 2000
 mf.kernel()
-#print(scf.dispersion.get_dispersion(mf,disp="d3bj"))
+
 
 resp = tdscf.TDDFT(mf)
 resp.nstates = 8
