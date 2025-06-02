@@ -1010,7 +1010,7 @@ class QMMultipole:
         self.weight_smooth_func = "poly"
         self.smooth_sigma = 0.2
         self.corr_espf = True
-        self.grid_block_size = 32
+        self.grid_block_size = 16
         self.grad_D = None
         self.ipesp = None
         

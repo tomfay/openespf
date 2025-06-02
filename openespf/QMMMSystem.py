@@ -203,6 +203,8 @@ class QMMMSystem:
         start = timer()
         #E_mm,F_mm = self.mm_system.getEnergyForces(terms="remainder")
         E_mm,F_mm = self.mm_system.getEnergyForces()
+        #print("Max mm force:" ,np.max(np.abs(F_mm)))
+        #print("Max mm force inds:" ,np.argmax(np.abs(F_mm)))
         energy_terms["mm remainder"] = E_mm - energy_terms["mm electrostatics"]
         force_terms_mm["mm remainder"] = F_mm - force_terms_mm["mm electrostatics"]
         end = timer()
@@ -219,9 +221,11 @@ class QMMMSystem:
         
         start1 = timer()
         force_terms_mm["QM+int"] = self.qm_system.getForcesMM()
+        #print("Max mm QM+int force:" ,np.max(np.abs(force_terms_mm["QM+int"])))
         if self.print_info : print("MM QM/MM force time:",timer()-start1,"s")
         start1 = timer()
         F_qm = self.qm_system.getForces(return_terms=True)
+        
         if self.print_info : print("QM QM/MM qm-force time:",timer()-start1,"s")
         start1 = timer()
         if self.mm_system.resp_mode_force == "linear":
@@ -234,8 +238,8 @@ class QMMMSystem:
             self.qm_system.F_int += F_qm_c_0
         
         if self.print_info : print("QM QM/MM classical-force time:",timer()-start1,"s")
-        
-        
+        #print("Max mm QM+int force:" ,np.max(np.abs(force_terms_mm["QM+int"])))
+        #print("Max qm QM+int force:" ,np.max(np.abs(F_qm["QM+int"])))
 
         if type(F_qm) is type([]):
             force_terms_qm = [{ **force_terms_qm, **F_n_qm} for F_n_qm in F_qm]

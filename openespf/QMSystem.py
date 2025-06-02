@@ -448,6 +448,7 @@ class QMSystem:
         Get the gradient of the QM + int energy with respect to a QM atom A
         '''
         self.grad_mf_qmmm = self.mf_qmmm.nuc_grad_method()
+        self.grad_mf_qmmm.verbose = self.mf.verbose
         self.grad_mf = self.mf.nuc_grad_method()
         
         if not "HF" in self.mf.__class__.__name__:
