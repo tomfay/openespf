@@ -1,3 +1,5 @@
+<img src="./logo/openespf-logo.png" alt="logo" width="35%">
+
 ### Installation
 
 I'd recommend installing PySCF and OpenMM through pip and conda respectively before installing OpenESPF.
