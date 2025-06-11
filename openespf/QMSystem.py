@@ -102,8 +102,10 @@ class QMSystem:
         #self.mf = self.mf.to_ks()
         
         # copy the scf object - methods *should* be modifiable in mf_qmmm without modifying original
-        self.mf_qmmm = (deepcopy(self.mf))
-        self.mf_int = (deepcopy(self.mf))
+        #self.mf_qmmm = (deepcopy(self.mf))
+        #self.mf_int = (deepcopy(self.mf))
+        self.mf_qmmm = self.mf.copy()
+        self.mf_int = self.mf.copy()
         
         self.mf_int.xc = "HF"
         self.mf_int.omega = 0.0

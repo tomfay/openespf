@@ -33,15 +33,17 @@ mol = gto.M(atom="7-inputs/methanal.xyz",unit="Angstrom",basis="6-31G*",charge=0
 mf = dft.RKS(mol)
 mf.xc = "HF"
 #mf = mf.density_fit(auxbasis="weigendjkfit")
-mf.conv_tol = 1.0e-12
+mf.conv_tol = 1.0e-10
 
 
 # Get info MM He system and set up the OpenMM simulation object
 pdb = PDBFile("7-inputs/h2o.pdb")
 topology = pdb.getTopology() 
+topology.setUnitCellDimensions((1.5,1.5,1.5))
 positions = pdb.getPositions()
 forcefield = ForceField("amoeba2018.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
+system = forcefield.createSystem(topology,nonbondedMethod=PME,nonbondedCutoff=0.7*nanometer)
 platform = Platform.getPlatformByName("Reference")
 integrator = VerletIntegrator(1e-16*picoseconds)
 simulation = Simulation(topology, system, integrator,platform)
@@ -101,7 +103,7 @@ J = 1 # QM atom to move
 # position of H-O-H H atom in nm
 R_HOH = np.array([0.25,0,0])
 # set up a grid of separations in nanometres units
-R_vals = np.linspace(0.5,-0.5,num=21) * 0.01
+R_vals = np.linspace(0.5,-0.5,num=21) * 0.025
 energies = np.zeros((3,R_vals.shape[0]))
 forces_qm = np.zeros((3,R_vals.shape[0],qm_positions.shape[0],3))
 forces_mm = np.zeros((3,R_vals.shape[0],mm_positions_ref.shape[0],3))

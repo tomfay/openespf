@@ -36,11 +36,13 @@ mf.conv_tol = 1.0e-12
 # Get info MM He system and set up the OpenMM simulation object
 pdb = PDBFile("7-inputs/h2o.pdb")
 topology = pdb.getTopology() 
+#topology.setUnitCellDimensions((1.5,1.5,1.5))
 positions = pdb.getPositions()
 #forcefield = ForceField("7-inputs/h2o.xml")
 #forcefield = ForceField("7-inputs/iamoeba_zero.xml")
 forcefield = ForceField("amoeba2018.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
+#system = forcefield.createSystem(topology,nonbondedMethod=PME,nonbondedCutoff=0.7*nanometer)
 platform = Platform.getPlatformByName("Reference")
 integrator = VerletIntegrator(1e-16*picoseconds)
 simulation = Simulation(topology, system, integrator,platform)
