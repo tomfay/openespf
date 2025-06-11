@@ -1,6 +1,6 @@
 [project]
 name = "openespf"
-version = "0.1.6"
+version = "0.1.7"
 authors = [
   { name="Thomas Fay", email="tom.patrick.fay@gmail.com" },
 ]
@@ -19,7 +19,9 @@ dependencies = [
   'pyscf',
   'openmm',
 ]
-
+[tool.setuptools.packages.find]
+include = ["openespf*"]
+exclude = ["logo*"]
 [project.urls]
 Homepage = "https://github.com/tomfay/openespf"
 Issues = "https://github.com/tomfay/openespf/issues"
