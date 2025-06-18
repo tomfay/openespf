@@ -6,7 +6,7 @@ from .Data import *
 #from .QMMultipole import QMMultipole
 
 # Package metadata
-__version__ = "0.1.0"
+__version__ = "0.1.8"
 __author__ = "Thomas Fay"
 __email__ = "tom.patrick.fay@gmail.com"
 
