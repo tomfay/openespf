@@ -415,7 +415,7 @@ class QMSystem:
         self.multipole.reset()
         # run the ground state SCF QM/MM calculation
         self.createModifiedSCF()
-        self.mf_qmmm.kernel(dm=self.dm_guess)
+        self.mf_qmmm.kernel(dm0=self.dm_guess)
         # get the energy
         E = self.mf_qmmm.energy_tot()
     
