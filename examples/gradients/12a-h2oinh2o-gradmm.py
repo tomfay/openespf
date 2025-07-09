@@ -47,12 +47,12 @@ positions = pdb.getPositions()
 #forcefield = ForceField("7-inputs/iamoeba_zero.xml")
 forcefield = ForceField("amoeba2018.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
-#system = forcefield.createSystem(topology,nonbondedMethod=PME,nonbondedCutoff=0.7*nanometer)
+#system = forcefield.createSystem(topology,nonbondedMethod=PME,nonbondedCutoff=1.0*nanometer)
 for force in system.getForces():
     if force.getName() == "AmoebaMultipoleForce":
         multipole_force = force
-multipole_force.setMutualInducedTargetEpsilon(1.0e-10)
-multipole_force.setMutualInducedMaxIterations(1000)
+multipole_force.setMutualInducedTargetEpsilon(1.0e-6)
+multipole_force.setMutualInducedMaxIterations(100)
 #system = forcefield.createSystem(topology,nonbondedMethod=PME,nonbondedCutoff=0.7*nanometer)
 platform = Platform.getPlatformByName("Reference")
 integrator = VerletIntegrator(1e-16*picoseconds)

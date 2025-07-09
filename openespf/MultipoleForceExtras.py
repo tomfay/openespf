@@ -268,7 +268,7 @@ def getMultipolePairTholeEnergyForce(rA,rB,qA,qB,dA,dB,QA,QB,damp,do_damp=True,d
     G = np.zeros((4,))
     G[0] = qA*qB
     G[1] = (qA * rAB.dot(dB)) - (qB * dA.dot(rAB) ) + (dA.dot(dB))
-    G[2] = qA * np.sum(QB*RAB) + qB * np.sum(QA*RAB) +2.0 * np.sum(QB * DAB) + 2.0 * np.sum(QA * DBA) \
+    G[2] = qA * np.sum(QB*RAB) + qB * np.sum(QA*RAB) -2.0 * np.sum(QB * DAB) - 2.0 * np.sum(QA * DBA) \
         - (dA.dot(rAB)) * (dB.dot(rAB)) #+ 2.0 * np.sum(QA*QB)
     #G[2] = - (dA.dot(rAB)) * (dB.dot(rAB)) + qA * np.sum(QB*RAB) + qB * np.sum(QA*RAB) \
     #    -2.0 * np.sum(QB * DAB) - 2.0 * np.sum(QA * DBA) # QA QB terms ignores
@@ -277,7 +277,7 @@ def getMultipolePairTholeEnergyForce(rA,rB,qA,qB,dA,dB,QA,QB,damp,do_damp=True,d
     dG = np.zeros((4,3))
     dG[1,:] = qB * dA - qA * dB
     dG[2,:] = - 2.0*qB * QA.dot(rAB) -2.0*qA * QB.dot(rAB)  \
-        + 2.0 * QB.dot(dA) - 2.0* QA.dot(dB)  \
+        - 2.0 * QB.dot(dA) + 2.0* QA.dot(dB)  \
         + (dA.dot(rAB)) * dB +  (dB.dot(rAB)) * dA
     dG[3,:] = - np.sum(QA*RAB) * dB - 2.0*(dB.dot(rAB)) * QA.dot(rAB) \
         + np.sum(QB*RAB) * dA + 2.0 *(dA.dot(rAB)) * QB.dot(rAB) 
@@ -306,8 +306,8 @@ def getMultipolePairTholeEnergyForce(rA,rB,qA,qB,dA,dB,QA,QB,damp,do_damp=True,d
     # original
     GtB[2,:] = (2.0*qA)*cross_matrix(RAB,QB) \
         - (dA.dot(rAB)) * np.cross(rAB,dB) \
-        + 2.0 * cross_matrix(DAB,QB) \
-        + 2.0 * cross_matrix(DAB.T,QB) \
+        - 2.0 * cross_matrix(DAB,QB) \
+        - 2.0 * cross_matrix(DAB.T,QB) \
         - 2.0 * np.cross(QA.dot(rAB),dB)
     GtB[3,:] = np.sum(QA*RAB) * np.cross(rAB,dB) \
         - (2.0*dA.dot(rAB)) * cross_matrix(RAB,QB) 
