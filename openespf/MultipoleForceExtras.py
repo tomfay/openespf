@@ -127,6 +127,9 @@ def getChargeDipoleEnergyThole(q1,d2,r1,r2):
     return PREFACTOR*(-q1/(r*r*r)) * r21.dot(d2)
 
 def getMultipolePairTholeEnergy(rA,rB,qA,qB,dA,dB,QA,QB,damp,do_damp=True):
+    return getMultipolePairTholeEnergyForce(rA,rB,qA,qB,dA,dB,QA,QB,damp,do_damp=do_damp,do_force=False)
+
+def getMultipolePairTholeEnergyOld(rA,rB,qA,qB,dA,dB,QA,QB,damp,do_damp=True):
     
     # separation and distance
     rBA = rB - rA
@@ -215,7 +218,7 @@ def getMultipolePairEnergyOld(rA,rB,qA,qB,dA,dB,QA,QB):
         
     return u
 
-def getMultipolePairTholeEnergyForce(rA,rB,qA,qB,dA,dB,QA,QB,damp,do_damp=True):
+def getMultipolePairTholeEnergyForce(rA,rB,qA,qB,dA,dB,QA,QB,damp,do_damp=True,do_force=True):
     
     
     # separation and distance
@@ -244,7 +247,7 @@ def getMultipolePairTholeEnergyForce(rA,rB,qA,qB,dA,dB,QA,QB,damp,do_damp=True):
         f[0] = 1.0 + ((au3)**(1./3.)) * (Gamma_incc - ((au3)**(-1.0/3.0)) * exp_au3)
         f[1] = 1.0 - exp_au3
         f[2] = 1.0 - (1.0+au3)*exp_au3
-        f[3] = 1.0 - (1.0+au3 + 0.6 * au3 * au3) *exp_au3
+        f[3] = 1.0 - (1.0 + au3 + 0.6 * au3 * au3) *exp_au3
         #f[4] = 1.0 - (1.0+au3 + (18.0*au3*au3 + 9.0*au3*au3*au3)/35.)*exp_au3
         # derivatives of the damping terms wrt au3
         df = np.zeros((4,))
@@ -265,7 +268,7 @@ def getMultipolePairTholeEnergyForce(rA,rB,qA,qB,dA,dB,QA,QB,damp,do_damp=True):
     G = np.zeros((4,))
     G[0] = qA*qB
     G[1] = (qA * rAB.dot(dB)) - (qB * dA.dot(rAB) ) + (dA.dot(dB))
-    G[2] = qA * np.sum(QB*RAB) + qB * np.sum(QA*RAB) -2.0 * np.sum(QB * DAB) - 2.0 * np.sum(QA * DBA) \
+    G[2] = qA * np.sum(QB*RAB) + qB * np.sum(QA*RAB) +2.0 * np.sum(QB * DAB) + 2.0 * np.sum(QA * DBA) \
         - (dA.dot(rAB)) * (dB.dot(rAB)) #+ 2.0 * np.sum(QA*QB)
     #G[2] = - (dA.dot(rAB)) * (dB.dot(rAB)) + qA * np.sum(QB*RAB) + qB * np.sum(QA*RAB) \
     #    -2.0 * np.sum(QB * DAB) - 2.0 * np.sum(QA * DBA) # QA QB terms ignores
@@ -273,10 +276,14 @@ def getMultipolePairTholeEnergyForce(rA,rB,qA,qB,dA,dB,QA,QB,damp,do_damp=True):
     # derivatives of G values wrt rB
     dG = np.zeros((4,3))
     dG[1,:] = qB * dA - qA * dB
-    dG[2,:] = - 2.0*qB * QA.dot(rAB) -2.0*qA * QB.dot(rAB)  - 2.0 * QB.dot(dA) + 2.0* QA.dot(dB)  \
+    dG[2,:] = - 2.0*qB * QA.dot(rAB) -2.0*qA * QB.dot(rAB)  \
+        + 2.0 * QB.dot(dA) - 2.0* QA.dot(dB)  \
         + (dA.dot(rAB)) * dB +  (dB.dot(rAB)) * dA
-    dG[3,:] = - 2.0*(dB.dot(rAB)) * QA.dot(rAB) + 2.0 *(dA.dot(rAB)) * QB.dot(rAB) \
-        + np.sum(QB*RAB) * dA - np.sum(QA*RAB) * dB
+    dG[3,:] = - np.sum(QA*RAB) * dB - 2.0*(dB.dot(rAB)) * QA.dot(rAB) \
+        + np.sum(QB*RAB) * dA + 2.0 *(dA.dot(rAB)) * QB.dot(rAB) 
+    
+    #G[3] *= 0.
+    #dG[3,:] *= 0.
     
     # pair energy is a sum of these terms
     if do_damp:
@@ -296,18 +303,26 @@ def getMultipolePairTholeEnergyForce(rA,rB,qA,qB,dA,dB,QA,QB,damp,do_damp=True):
     GtB = np.zeros((4,3))
     GtB[0,:] = 0.0 # GtA_0 is zero - included for readability
     GtB[1,:] = qA * np.cross(rAB,dB) + np.cross(dA,dB)
-    GtB[2,:] = (2.0*qA)*cross_matrix(RAB,QB) - (dA.dot(rAB)) * np.cross(rAB,dB) \
-        + 2.0 * cross_matrix(DAB,QB) + 2.0 * cross_matrix(DAB.T,QB) \
-        - 2.0 * np.cross(QA.dot(rAB),dB) 
-    GtB[3,:] = np.sum(QA*RAB) * np.cross(rAB,dB) - (2.0*dA.dot(rAB)) * cross_matrix(RAB,QB)
+    # original
+    GtB[2,:] = (2.0*qA)*cross_matrix(RAB,QB) \
+        - (dA.dot(rAB)) * np.cross(rAB,dB) \
+        + 2.0 * cross_matrix(DAB,QB) \
+        + 2.0 * cross_matrix(DAB.T,QB) \
+        - 2.0 * np.cross(QA.dot(rAB),dB)
+    GtB[3,:] = np.sum(QA*RAB) * np.cross(rAB,dB) \
+        - (2.0*dA.dot(rAB)) * cross_matrix(RAB,QB) 
+    #GtB[3,:] *= 0.
     # for A
     GtA = np.zeros((4,3))
     GtA[0,:] = 0.0  # GtB_0 is zero - included for readability
     GtA[1,:] = qB * np.cross(rBA, dA) + np.cross(dB, dA)
-    GtA[2,:] = (2.0*qB)*cross_matrix(RBA,QA) - (dB.dot(rBA)) * np.cross(rBA,dA) \
-        + 2.0 * cross_matrix(DBA,QA) + 2.0 * cross_matrix(DBA.T,QA) \
+    GtA[2,:] = (2.0*qB)*cross_matrix(RBA,QA) \
+        - (dB.dot(rBA)) * np.cross(rBA,dA) \
+        + 2.0 * cross_matrix(DBA,QA) \
+        + 2.0 * cross_matrix(DBA.T,QA) \
         - 2.0 * np.cross(QB.dot(rBA),dA)
-    GtA[3,:] = np.sum(QA * RAB) * np.cross(rAB, dB) - (2.0 * dA.dot(rAB)) * cross_matrix(RAB, QB)
+    GtA[3,:] = np.sum(QA * RAB) * np.cross(rAB, dB) \
+        - (1.0 * dA.dot(rAB)) * cross_matrix(RAB, QB)
     if do_damp:
         tauA = PREFACTOR * np.sum(GtA[1:,:]*B[1:4,None]*f[1:,None],axis=0)
         tauB = PREFACTOR * np.sum(GtB[1:,:]*B[1:4,None]*f[1:,None],axis=0)
@@ -315,7 +330,10 @@ def getMultipolePairTholeEnergyForce(rA,rB,qA,qB,dA,dB,QA,QB,damp,do_damp=True):
         tauA = PREFACTOR * np.sum(GtA[1:,:]*B[1:4,None],axis=0)
         tauB = PREFACTOR * np.sum(GtB[1:,:]*B[1:4,None],axis=0)
     
-    return u, -fB, fB, tauA, tauB
+    if do_force:
+        return u, -fB, fB, tauA, tauB
+    else:
+        return u
 
 def getMultipolePairEnergyForce(rA,rB,qA,qB,dA,dB,QA,QB):
     return getMultipolePairTholeEnergyForce(rA,rB,qA,qB,dA,dB,QA,QB,None,do_damp=False)

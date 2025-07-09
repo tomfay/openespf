@@ -31,7 +31,9 @@ mf = dft.RKS(mol)
 mf.xc = "HF"
 #mf.xc = "PBE0"
 #mf = mf.density_fit(auxbasis="weigendjkfit")
-mf.conv_tol = 1.0e-12
+mf.conv_tol = 1.0e-10
+mf.conv_tol_grad = None
+mf.max_cycle = 1000
 
 # Get info MM He system and set up the OpenMM simulation object
 pdb = PDBFile("7-inputs/h2o.pdb")
@@ -42,14 +44,26 @@ positions = pdb.getPositions()
 #forcefield = ForceField("7-inputs/iamoeba_zero.xml")
 forcefield = ForceField("amoeba2018.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
+for force in system.getForces():
+    if force.getName() == "AmoebaMultipoleForce":
+        multipole_force = force
+multipole_force.setMutualInducedTargetEpsilon(1.0e-6)
+multipole_force.setMutualInducedMaxIterations(100)
 #system = forcefield.createSystem(topology,nonbondedMethod=PME,nonbondedCutoff=0.7*nanometer)
 platform = Platform.getPlatformByName("Reference")
 integrator = VerletIntegrator(1e-16*picoseconds)
 simulation = Simulation(topology, system, integrator,platform)
+#simulation.context.getPlatform().setPropertyValue(simulation.context,'Precision','double')
 simulation.context.setPositions(positions)
+#print(dir(simulation.context))
+#print(simulation.context.getPlatform().getPropertyNames())
+#print(simulation.context.getPlatform().getPropertyValue(simulation.context,'Precision'))
+#print(simulation.context.getPlatform().setPropertyValue(simulation.context,'Precision','double'))
+#
+#exit()
 
 # information about the QM-MM interaction
-multipole_order = 1 # 0=charges, 1=charges+dipoles for QM ESPF multipole operators
+multipole_order = 0 # 0=charges, 1=charges+dipoles for QM ESPF multipole operators
 multipole_method = "espf" # "espf" or "mulliken" type multipole operators
 # information for the exchange-repulsion model (atomic units)
 rep_type_info = [{"N_eff":4.0+0.669,"R_dens":1.71*Data.ANGSTROM_TO_BOHR,"rho(R_dens)":1.0e-3},
@@ -71,6 +85,7 @@ qmmm_system.mm_system.use_prelim_mpole = False # set to true to use pre-limit fo
 #qmmm_system.mm_system.prelim_dr = 1.0e-2 # default value is 1.0e-2
 qmmm_system.mm_system.resp_mode_force = "linear"
 qmmm_system.mm_system.damp_perm = True
+qmmm_system.mm_system.damp_chargedipole_only = False
 qmmm_system.mm_system.damp_charge_only = False
 
 # get positions for the QM and MM atoms
@@ -97,13 +112,15 @@ dm = mf.make_rdm1()
 qmmm_system.qm_system.dm_guess = dm
 
 # position of H-O-H H atom in nm
-R_HOH = np.array([0.25,0,0])
+R_HOH = np.array([0.1,0.1,0.1])
 # set up a grid of separations in nanometres units
-R_vals = np.linspace(0.5,-0.5,num=21) * 0.01
+R_vals = np.linspace(0.5,-0.5,num=21) * 0.03
 energies = np.zeros((3,R_vals.shape[0]))
 forces_qm = np.zeros((3,R_vals.shape[0],qm_positions.shape[0],3))
 forces_mm = np.zeros((3,R_vals.shape[0],mm_positions_ref.shape[0],3))
-J = 0 # index of MM atom being probed
+energies_mm0 = np.zeros((3,R_vals.shape[0]))
+forces_mm0 = np.zeros((3,R_vals.shape[0],mm_positions_ref.shape[0],3)) 
+J = 1 # index of MM atom being probed
 for x in range(0,3):
     n_x = np.array([0.,0.,0.])
     n_x[x] = 1.0
@@ -124,6 +141,15 @@ for x in range(0,3):
         energies[x,n] = E_qmmm + 0
         forces_qm[x,n,:,:] = F_qm + 0
         forces_mm[x,n,:,:] = F_mm + 0
+        
+        # get the pure MM energy and forces
+        simulation.context.setPositions(mm_positions)
+        state = simulation.context.getState(getEnergy=True,getForces=True)
+        energies_mm0[x,n] = state.getPotentialEnergy()._value * Data.KJMOL_TO_HARTREE
+        forces_mm0[x,n,:,:] = state.getForces(asNumpy=True)._value * Data.KJMOL_TO_HARTREE / Data.NM_TO_BOHR
+        # update the dm guess
+        dm = qmmm_system.qm_system.mf_qmmm.make_rdm1() 
+        
 
 
 # calculate the fourth-order finite difference forces
@@ -131,21 +157,34 @@ dR = (R_vals[1]-R_vals[0])*Data.NM_TO_BOHR
 N_R = len(R_vals)
 forces_num = []
 forces_an = []
+forces_num0 = []
+forces_an0 = []
 for x in range(0,3):
     E = energies[x,:]+0
+    E0 = energies_mm0[x,:]+0
     f_num_4 = np.zeros((N_R))
+    f_num_4_mm0 = np.zeros((N_R))
     for n in range(2,N_R-2):
         #print(n)
+        # 4th order finite difference
         f_num_4[n] = (1.0/12.0)*E[n-2] - (2.0/3.0) * E[n-1] +  (2.0/3.0) * E[n+1] - (1.0/12.0)*E[n+2]
+        f_num_4_mm0[n] = (1.0/12.0)*E0[n-2] - (2.0/3.0) * E0[n-1] +  (2.0/3.0) * E0[n+1] - (1.0/12.0)*E0[n+2]
+        # 2nd order finite difference
+        #f_num_4[n] = 0.5 * (-E[n-1] + E[n+1])
+        #f_num_4_mm0[n] = 0.5 * (-E0[n-1] + E0[n+1])
 
     f_num_4 *= -(1.0/dR)
+    f_num_4_mm0 *= -(1.0/dR)
     f_num_4[0:2] = np.nan
     f_num_4[N_R-2] = np.nan
     f_num_4[N_R-1] = np.nan
     forces_num.append(f_num_4)
     forces_an.append(forces_mm[x,:,J,x])
+    forces_num0.append(f_num_4_mm0)
+    forces_an0.append(forces_mm0[x,:,J,x])
 
 np.set_printoptions(linewidth=500)
+print("dR = ",dR ,"bohr = ", dR*Data.BOHR_TO_NM, "nm")
 print("Numerical forces") 
 R_vals_num = R_vals[2:-2]
 for f in forces_num:
@@ -155,7 +194,23 @@ for f in forces_an:
     print(f[2:-2])   
 print("Difference forces") 
 for f,f_num in zip(forces_an,forces_num):
-    print(f[2:-2]-f_num[2:-2])   
+    print(f[2:-2]-f_num[2:-2])  
+    
+print("Numerical MM forces") 
+R_vals_num = R_vals[2:-2]
+for f in forces_num0:
+    print(f[2:-2])     
+print("Analytical MM forces") 
+for f in forces_an0:
+    print(f[2:-2])   
+print("Difference MM forces") 
+for f,f_num in zip(forces_an0,forces_num0):
+    print(f[2:-2]-f_num[2:-2])  
+
+print("Difference without MM forces") 
+for f,f_num,f0,f_num0 in zip(forces_an,forces_num,forces_an0,forces_num0):
+    print(f[2:-2]-f0[2:-2]-f_num[2:-2]+f_num0[2:-2])  
+    
 print("R_vals")
 print(R_vals_num)
 
@@ -179,6 +234,16 @@ for x in range(0,3):
     plt.plot(R_vals*1.0e1,(forces_an[x])*1e3,'--',label="Analytical "+axes[x])
 plt.xlabel("Separation [Angstrom]")
 plt.ylabel("Force [mH/bohr]")
+plt.legend()
+
+plt.show()
+
+axes = {0:"x",1:"y",2:"z"}
+for x in range(0,3):
+    plt.plot(R_vals_num*1.0e1,(forces_num[x][2:-2]-forces_num0[x][2:-2])*1e3,label="Numerical "+axes[x])
+    plt.plot(R_vals*1.0e1,(forces_an[x]-forces_an0[x])*1e3,'--',label="Analytical "+axes[x])
+plt.xlabel("Separation [Angstrom]")
+plt.ylabel("Force - Force(MM) [mH/bohr]")
 plt.legend()
 
 plt.show()

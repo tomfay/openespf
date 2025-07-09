@@ -4,6 +4,7 @@ import numpy as np
 from scipy.linalg import sqrtm, inv, solve
 from .QMMultipole import QMMultipole
 from .MultipoleForceExtras import getDist
+import openespf.Data as Data
 from copy import deepcopy, copy
 from timeit import default_timer as timer
 
@@ -430,7 +431,7 @@ class QMSystem:
         if units_out in ["AU","au","Hartree","hartree"]:
             conv = 1.0
         elif units_out in ["OpenMM","kJ/mol"]:
-            Eh = 2625.4996352210997 # hartree in kJ/mol
+            Eh = Data.HARTREE_TO_KJMOL # hartree in kJ/mol
             conv = Eh
         
         #E = E * conv
@@ -777,8 +778,8 @@ class QMSystem:
         if units_out in ["AU","au","Hartree","hartree"]:
             conv = 1.0
         elif units_out in ["OpenMM","kJ/mol"]:
-            Eh = 2625.4996352210997 # hartree in kJ/mol
-            a0 = 0.52917721092e-1 # bohr in nm
+            Eh = Data.HARTREE_TO_KJMOL # hartree in kJ/mol
+            a0 = Data.BOHR_TO_NM # bohr in nm
             conv = Eh/a0
         
         

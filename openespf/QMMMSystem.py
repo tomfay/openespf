@@ -5,6 +5,7 @@ The QMMMSystem object handles all energy+force evaluations for the full QM/MM sy
 from .MMSystem import MMSystem
 from .QMSystem import QMSystem
 from .MultipoleForceExtras import getDist, getNearestImages
+import openespf.Data as Data
 from pyscf import gto
 from pyscf import data
 from scipy.optimize import fsolve
@@ -67,9 +68,9 @@ class QMMMSystem:
             if mm_unit in ["Bohr","bohr","AU","au"]:
                 mm_conv = 1.0
             elif mm_unit in ["nanometer"]:
-                mm_conv = 1.0/0.52917721092e-1
+                mm_conv = 1.0/Data.BOHR_TO_NM
             elif mm_unit in ["Angstrom","Ang","A","angstrom","ang"]:
-                mm_conv = 1.0/0.52917721092e0
+                mm_conv = 1.0/Data.BOHR_TO_ANGSTROM
             self.mm_system.setPositions(mm_positions,units_in=mm_unit)
             self.mm_positions = self.mm_system.getPositions()
         
@@ -77,9 +78,9 @@ class QMMMSystem:
             if qm_unit in ["Bohr","bohr","AU","au"]:
                 qm_conv = 1.0 
             elif qm_unit in ["nanometer"]:
-                qm_conv = 1.0/0.52917721092e-1
+                qm_conv = 1.0/Data.BOHR_TO_NM
             elif qm_unit in ["Angstrom","Ang","A","angstrom","ang"]:
-                qm_conv = 1.0/0.52917721092e0
+                qm_conv = 1.0/Data.BOHR_TO_ANGSTROM
             
             self.qm_system.setPositions(qm_positions * qm_conv)
             self.qm_positions = self.qm_system.getPositions()

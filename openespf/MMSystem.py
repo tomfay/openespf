@@ -3,6 +3,7 @@ import numpy as np
 from copy import deepcopy
 from timeit import default_timer as timer
 from .Data import *
+import openespf.Data as Data
 import openespf.MultipoleForceExtras as extra
 
 def getOpenMMPlatforms():
@@ -26,13 +27,14 @@ class MMSystem:
         self.damp_default = 0.0
         self.qm_thole = None
         self.qm_damp = None
-        self.test_dipole = 1.0
-        self.test_charge = 10.0e0
+        self.test_dipole = 1.0*Data.BOHR_TO_NM
+        self.test_charge = 1.0e1
         self.print_info = False
-        self.induced_dipole_error = 1.0e-6
-        self.max_iter_induced = 100
+        #self.induced_dipole_error = 1.0e-8
+        #self.max_iter_induced = 100
         self.resp_mode = "linear"
-        self.prelim_dr = 1.0e-1*BOHR_TO_NM # in nanometers
+        self.prelim_dr = 1.0e-1*Data.BOHR_TO_NM # in nanometers
+        #self.precision = 'double'
         avail_platforms = getOpenMMPlatforms()
         if "OpenCL" in avail_platforms or "GPU" in avail_platforms:
             self.use_prelim_mpole = False # use prelimit form of multipoles
@@ -41,8 +43,13 @@ class MMSystem:
             print("Warning: OpenCL or GPU platform not detected so switching to pre-limit dipole mode. dr = ", self.prelim_dr, "nm ." )
             print("You can change this by manually setting mm_system.use_prelim_mpole = False.")
         
+        # get precision of the context
+        if simulation.context.getPlatform().getName() == 'OpenCL':
+            self.precision = simulation.context.getPlatform().getPropertyValue(simulation.context,'Precision')
+        
         self.damp_perm = True
         self.damp_charge_only = False
+        self.damp_chargedipole_only = False
         self.resp_mode_force = "linear"
         
         # Get MM system simulation object
@@ -56,11 +63,12 @@ class MMSystem:
         self.multipole_force = AmoebaMultipoleForce()
         for force in self.system.getForces():
             if force.getName() == "AmoebaMultipoleForce":
-                force.setMutualInducedTargetEpsilon(self.induced_dipole_error)
-                force.setMutualInducedMaxIterations(self.max_iter_induced)
+                #force.setMutualInducedTargetEpsilon(self.induced_dipole_error)
+                #force.setMutualInducedMaxIterations(self.max_iter_induced)
                 force.setForceGroup(0)
                 force.updateParametersInContext(simulation.context)
                 self.multipole_force = deepcopy(force)
+                
                 #if self.multipole_force.getPolarizationType() == self.multipole_force.Mutual:
                 #    print("Multipole forces uses Mutual polarization.")
                 #elif self.multipole_force.getPolarizationType() == self.multipole_force.Direct:
@@ -69,6 +77,8 @@ class MMSystem:
                 #    print("Multipole forces uses Extrapolated polarization.")
                 self.multipole_force.setNonbondedMethod(force.getNonbondedMethod())
                 self.multipole_force.setPolarizationType(force.getPolarizationType())
+                self.induced_dipole_error = force.getMutualInducedTargetEpsilon()
+                self.max_iter_induced = force.getMutualInducedMaxIterations()
                 if force.getNonbondedMethod() == force.PME:
                     #print(force.getPMEParametersInContext(self.simulation.context))
                     self.multipole_force.setPMEParameters(*force.getPMEParametersInContext(self.simulation.context))
@@ -131,13 +141,22 @@ class MMSystem:
         
         # set up the new Simulation object for the multipole force
         integrator = VerletIntegrator(1e-16)
-        try:
-            platform = simulation.platform
-        except:
-            platform = None
+        #try:
+        #    platform = simulation.platform
+        #except:
+        #    platform = None
+        platform = Platform.getPlatformByName(simulation.context.getPlatform().getName())
+        if self.simulation.context.getPlatform().getName()=='OpenCL':
+            platform.setPropertyDefaultValue('Precision',self.precision)
+        #print(platform.getName())
         
         self.multipole_simulation = app.Simulation(self.multipole_topology,self.multipole_system,integrator,
                                               platform)
+        #print(self.multipole_simulation.context.getPlatform().getName())
+        if self.multipole_simulation.context.getPlatform().getName()=='OpenCL':
+            platform = self.multipole_simulation.context.getPlatform()
+            platform.setPropertyValue(self.multipole_simulation.context,'Precision',self.precision)
+        
         if self.print_info:
             for i,force in enumerate(self.simulation.system.getForces()):
                 print(force.getName(),force.getForceGroup())
@@ -157,7 +176,7 @@ class MMSystem:
         elif units_in in ["Angstrom","Ang","A","angstrom","ang"]:
             conv = 0.1
         elif units_in in ["Bohr","bohr","AU","au"]:
-            conv = 0.52917721092e-1
+            conv = Data.BOHR_TO_NM
         
         if type(positions[0]) == (type(Vec3(0,0,0)*unit.nanometer)):
             # case where positions has opennMM unit type
@@ -203,7 +222,7 @@ class MMSystem:
         if units_in == "nanometer":
             conv = 1.0
         elif units_in in ["Bohr","AU","au","bohr"]:
-            conv = 0.52917721092e-1 
+            conv = Data.BOHR_TO_NM
         elif units_in in ["Angstrom","Ang","A","angstrom","ang"]:
             conv = 0.1
             
@@ -1005,8 +1024,8 @@ class MMSystem:
             if self.damp_perm:
                 pol_resp["U_1_uncorr"] = U_1_uncorr
         elif units_out in ["AU","au"]:
-            Eh = 2625.4996352210997 # hartree in kJ/mol
-            a0 = 0.52917721092e-1 # bohr in nm
+            Eh = Data.HARTREE_TO_KJMOL # hartree in kJ/mol
+            a0 = Data.BOHR_TO_NM # bohr in nm
             conv = np.ones(U_1.shape)
             N_Q = conv.shape[0]
             if multipole_order==1:
@@ -1028,8 +1047,8 @@ class MMSystem:
         if units_out == "OpenMM":
             pol_resp = {"U_0":U_0,"U_1":U_1,"U_2":U_2,"units":units_out} 
         elif units_out in ["AU","au"]:
-            Eh = 2625.4996352210997 # hartree in kJ/mol
-            a0 = 0.52917721092e-1 # bohr in nm
+            Eh = Data.HARTREE_TO_KJMOL # hartree in kJ/mol
+            a0 = Data.BOHR_TO_NM # bohr in nm
             U_0 = U_0 / Eh
             
             
@@ -1045,8 +1064,8 @@ class MMSystem:
         if units_out == "OpenMM":
             pol_resp = {"U_0":U_0,"U_1":U_1,"U_2":U_2,"units":units_out} 
         elif units_out in ["AU","au"]:
-            Eh = 2625.4996352210997 # hartree in kJ/mol
-            a0 = 0.52917721092e-1 # bohr in nm
+            Eh = Data.HARTREE_TO_KJMOL # hartree in kJ/mol
+            a0 = Data.BOHR_TO_NM # bohr in nm
             Eh_per_a0 = Eh / a0
             U_0 = U_0 / Eh
             F = F / Eh_per_a0
@@ -1143,8 +1162,8 @@ class MMSystem:
         
         # collect everything together into a dictionary and convert units as needed
         if units_out in ["AU","au"]:
-            Eh = 2625.4996352210997 # hartree in kJ/mol i.e. kJmol-1/Hartree
-            a0 = 0.52917721092e-1 # bohr in nm i.e. nm/bohr
+            Eh = Data.HARTREE_TO_KJMOL # hartree in kJ/mol
+            a0 = Data.BOHR_TO_NM # bohr in nm
             Eh_per_a0 = Eh / a0
             conv = np.ones(U_1.shape)
             N_Q = conv.shape[0]
@@ -1196,7 +1215,7 @@ class MMSystem:
         elif units in ["Angstrom","Ang","A","angstrom","ang"]:
             conv = 1.0/0.1
         elif units in ["Bohr","bohr","AU","au"]:
-            conv = 1.0/0.52917721092e-1
+            conv = 1.0/Data.BOHR_TO_NM
         
         if as_numpy and no_openmmunit:
             return conv*np.array([[R._value.x,R._value.y,R._value.z] for R in self.positions])
@@ -1219,7 +1238,7 @@ class MMSystem:
             energy = self.simulation.context.getState(getEnergy=True,enforcePeriodicBox=True,groups=1).getPotentialEnergy()
         
         if units_out in ["AU","au","Hartree","hartree"]:
-            Eh = 2625.4996352210997 # hartree in kJ/mol
+            Eh = Data.HARTREE_TO_KJMOL # hartree in kJ/mol
             conv = 1.0/Eh
         elif units_out in ["OpenMM","kJ/mol"]:
             conv = 1.0
@@ -1238,8 +1257,8 @@ class MMSystem:
         energy = state.getPotentialEnergy()
         force = state.getForces(asNumpy=True)
         if units_out in ["AU","au"]:
-            Eh = 2625.4996352210997 # hartree in kJ/mol
-            a0 = 0.52917721092e-1 # bohr in nm
+            Eh = Data.HARTREE_TO_KJMOL # hartree in kJ/mol
+            a0 = Data.BOHR_TO_NM # bohr in nm
             Eh_per_a0 = Eh / a0
             conv_energy = 1.0/Eh
             conv_force = 1.0/Eh_per_a0
@@ -1258,7 +1277,7 @@ class MMSystem:
             return None
         else:
             if units in ["Bohr","bohr","AU","au"]:
-                conv = NM_TO_BOHR
+                conv = Data.NM_TO_BOHR
             elif units in ["nanometer","NM","nm","openmm","OpenMM"]:
                 conv = 1.0
             pbc_dims = self.multipole_topology.getUnitCellDimensions()._value 
@@ -1342,13 +1361,19 @@ class MMSystem:
      
         # set up the new Simulation object for the multipole force
         integrator = VerletIntegrator(1e-16)
-        try:
-            platform = simulation.platform
-        except:
-            platform = None
-        
+        #try:
+        #    platform = simulation.platform
+        #except:
+        #    platform = None
+        platform = Platform.getPlatformByName(self.multipole_simulation.context.getPlatform().getName())
+        if self.multipole_simulation.context.getPlatform().getName()=='OpenCL':
+            platform.setPropertyDefaultValue('Precision',self.precision)
         self.multipole_simulation_dir = app.Simulation(self.multipole_topology_dir,self.multipole_system_dir,integrator,
                                               platform)
+        
+        if self.multipole_simulation_dir.context.getPlatform().getName()=='OpenCL':
+            platform = self.multipole_simulation_dir.context.getPlatform()
+            platform.setPropertyValue(self.multipole_simulation_dir.context,'Precision',self.precision)
         
         #print("Dir PBC?:",self.multipole_force_dir.usesPeriodicBoundaryConditions(),self.multipole_simulation_dir.topology.getPeriodicBoxVectors())
         #print("PME:",self.multipole_force_dir.getPMEParametersInContext(self.multipole_simulation_dir.context))
@@ -1441,14 +1466,17 @@ class MMSystem:
         
         # set up the new Simulation object for the multipole force
         integrator = VerletIntegrator(1e-16)
-        try:
-            platform = simulation.platform
-        except:
-            platform = None
+        
+        platform = Platform.getPlatformByName(self.multipole_simulation.context.getPlatform().getName())
+        if self.multipole_simulation.context.getPlatform().getName()=='OpenCL':
+            platform.setPropertyDefaultValue('Precision',self.precision)
         #print(self.multipole_system_pol.getNumParticles())
         #print(self.multipole_force_pol.getNumMultipoles())
         self.multipole_simulation_pol = app.Simulation(self.multipole_topology_pol,self.multipole_system_pol,integrator,
                                               platform)
+        if self.multipole_simulation_pol.context.getPlatform().getName()=='OpenCL':
+            platform = self.multipole_simulation_pol.context.getPlatform()
+            platform.setPropertyValue(self.multipole_simulation_pol.context,'Precision',self.precision)
         
         return
     
@@ -1522,14 +1550,18 @@ class MMSystem:
                     self.multipole_topology_probe.addBond(atoms[i+N_MM],atoms[j+N_MM])
         # set up the new Simulation object for the multipole force
         integrator = VerletIntegrator(1e-16)
-        try:
-            platform = self.simulation.platform
-        except:
-            platform = None
-        
+        #try:
+        #    platform = self.simulation.platform
+        #except:
+        #    platform = None
+        platform = Platform.getPlatformByName(self.multipole_simulation.context.getPlatform().getName())
+        if self.multipole_simulation.context.getPlatform().getName()=='OpenCL':
+            platform.setPropertyDefaultValue('Precision',self.precision)
         self.multipole_simulation_probe = app.Simulation(self.multipole_topology_probe,self.multipole_system_probe,integrator,
                                               platform)
-        
+        if self.multipole_simulation_probe.context.getPlatform().getName()=='OpenCL':
+            platform = self.multipole_simulation_probe.context.getPlatform()
+            platform.setPropertyValue(self.multipole_simulation_probe.context,'Precision',self.precision)
         
         return
 
@@ -1931,12 +1963,18 @@ class MMSystem:
 
         # set up the new Simulation object for the multipole force
         integrator = VerletIntegrator(1e-16)
-        try:
-            platform = simulation.platform
-        except:
-            platform = None
+        #try:
+        #    platform = simulation.platform
+        #except:
+        #    platform = None
+        platform = Platform.getPlatformByName(self.multipole_simulation.context.getPlatform().getName())
+        if self.multipole_simulation.context.getPlatform().getName()=='OpenCL':
+            platform.setPropertyDefaultValue('Precision',self.precision)
         self.multipole_simulation_self = app.Simulation(self.multipole_topology_self,self.multipole_system_self,integrator,
                                               platform)
+        if self.multipole_simulation_self.context.getPlatform().getName()=='OpenCL':
+            platform = self.multipole_simulation_self.context.getPlatform()
+            platform.setPropertyValue(self.multipole_simulation_self.context,'Precision',self.precision)
         #print("PME params:",self.multipole_force_self.getPMEParametersInContext(self.multipole_simulation_self.context))
         #print("cutoff:",self.multipole_force_self.getCutoffDistance())
         return
@@ -2250,6 +2288,8 @@ class MMSystem:
                     else:
                         rY = None
                     dB, qB = extra.getLabFrameMultipoles(dB,qB,rB, axis_type,rZ=rZ,rX=rX,rY=rY)
+                    if self.damp_chargedipole_only:
+                        qB *= 0.0
                     if self.damp_charge_only:
                         dB *= 0.0
                         qB *= 0.0
