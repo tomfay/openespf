@@ -1,0 +1,38 @@
+<ForceField>
+ <AtomTypes>
+  <Type name="1" class="1" element="O" mass="15.99943"/>
+  <Type name="2" class="2" element="H" mass="1.007947"/>
+ </AtomTypes>
+ <Residues>
+  <Residue name="HOH">
+   <Atom name="O" type="1"/>
+   <Atom name="H1" type="2"/>
+   <Atom name="H2" type="2"/>
+   <Bond atomName1="O" atomName2="H1"/>
+   <Bond atomName1="O" atomName2="H2"/>
+  </Residue>
+ </Residues>
+ <HarmonicBondForce>
+  <Bond class1="1" class2="2" length="0.1012" k="443153.381"/>
+ </HarmonicBondForce>
+ <HarmonicAngleForce>
+  <Angle class1="2" class2="1" class3="2" angle="1.976410844958379" k="317.566"/>
+ </HarmonicAngleForce>
+<AmoebaMultipoleForce  direct11Scale="0.0"  direct12Scale="1.0"  direct13Scale="1.0"  direct14Scale="1.0"  mpole12Scale="0.0"  mpole13Scale="0.0"  mpole14Scale="0.4"  mpole15Scale="0.8"  mutual11Scale="1.0"  mutual12Scale="1.0"  mutual13Scale="1.0"  mutual14Scale="1.0"  polar12Scale="0.0"  polar13Scale="0.0"  polar14Intra="0.5"  polar14Scale="1.0"  polar15Scale="1.0"  > 
+    <Multipole type="1" kz="0" kx="0" c0="-0.82" d1="0.0" d2="0.0" d3="0.0" q11="0.0" q21="0.0" q22="0.0" q31="0.0" q32="0.0" q33="0.0"  />
+    <Multipole type="2" kz="0" kx="0" c0="0.41" d1="0.0" d2="0.0" d3="0.0" q11="0.0" q21="0.0" q22="0.0" q31="0.0" q32="0.0" q33="0.0"  />
+    <Polarize type="1" polarizability="0.0" thole="0.39" pgrp1="2"/>
+    <Polarize type="2" polarizability="0.0" thole="0.39" pgrp1="1"/>
+</AmoebaMultipoleForce>
+ <NonbondedForce coulomb14scale="0.5" lj14scale="0.5">
+  <Atom type="1" charge="0.0" sigma="0.31507524065751241" epsilon="0.6502994552"/>
+  <Atom type="2" charge="0.0" sigma="1" epsilon="0.0"/>
+ </NonbondedForce>
+  <!--
+  <AmoebaVdwForce type="BUFFERED-14-7" radiusrule="CUBIC-MEAN" radiustype="R-MIN" radiussize="DIAMETER" epsilonrule="HHG" vdw-13-scale="0.0" vdw-14-scale="1.0" vdw-15-scale="1.0">
+   <Vdw class="1" sigma="3.645297e-01" epsilon="8.2348e-01" reduction="1.0"/> 
+   <Vdw class="2" sigma="1.0" epsilon="0.0" reduction="1.0"/> 
+ </AmoebaVdwForce>
+ -->
+</ForceField>
+

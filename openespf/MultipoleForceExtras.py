@@ -218,6 +218,33 @@ def getMultipolePairEnergyOld(rA,rB,qA,qB,dA,dB,QA,QB):
         
     return u
 
+def getDampedCoreRepEnergyForce(rA,rB,ZA,ZB,damp,do_force=True):
+    # separation and distance
+    rBA = rB - rA
+    rAB = - rBA
+    r = np.linalg.norm(rAB)
+    
+    # damping term
+    au3 = damp * r * r * r
+    exp_au3 = np.exp(-au3)
+    Gamma_incc = GAMMA_TWOTHIRDS * gammaincc(2.0/3.0,au3) # Gamma(2/3,au^3)
+    f = 1.0 + ((au3)**(1./3.)) * (Gamma_incc - ((au3)**(-1.0/3.0)) * exp_au3)
+    df = (Gamma_incc) / (3. * (au3)**(2./3.) )
+    dau3_r = 3.0*damp*r # (1/r) * d(au^3)/dr
+    df *= dau3_r 
+    
+    # energy
+    #U = (ZA*ZB/r ) * ((1.0-np.sqrt(f))*(1.0-np.sqrt(f)))
+    #dU_dr = - U/(r) + (ZA*ZB/r ) * ((1.0/np.sqrt(f)-1.0) *df*r) 
+    U = (ZA*ZB/r ) * (1.0 - f)
+    dU_dr = - U/(r) + (ZA*ZB/r ) * (-df*r)
+    fA = (-dU_dr/r) * (rAB)
+    fB = -fA
+    if do_force:
+        return PREFACTOR*U, PREFACTOR*fA, PREFACTOR*fB
+    else:
+        return PREFACTOR*U
+
 def getMultipolePairTholeEnergyForce(rA,rB,qA,qB,dA,dB,QA,QB,damp,do_damp=True,do_force=True):
     
     

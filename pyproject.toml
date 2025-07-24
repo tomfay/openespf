@@ -1,6 +1,6 @@
 [project]
 name = "openespf"
-version = "0.1.9"
+version = "0.1.11"
 authors = [
   { name="Thomas Fay", email="tom.patrick.fay@gmail.com" },
 ]

@@ -87,6 +87,8 @@ qmmm_system.mm_system.resp_mode_force = "linear"
 qmmm_system.mm_system.damp_perm = True
 qmmm_system.mm_system.damp_chargedipole_only = False
 qmmm_system.mm_system.damp_charge_only = False
+Z_MM = np.array([6.0,1.0,1.0])
+qmmm_system.setupCPRepulsion(Z_MM,Z_QM=None)
 
 # get positions for the QM and MM atoms
 mm_positions_ref = simulation.context.getState(getPositions=True).getPositions(asNumpy=True)._value

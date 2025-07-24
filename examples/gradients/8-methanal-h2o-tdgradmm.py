@@ -28,8 +28,8 @@ import matplotlib.pyplot as plt
 mol = gto.M(atom="7-inputs/methanal.xyz",unit="Angstrom",basis="STO-3G",charge=0)
 # The DFT method is chosen to be a long-range-corrected functional with density fitting
 mf = dft.RKS(mol)
-mf.xc = "B3LYP"
-#mf = scf.RHF(mol)
+#mf.xc = "B3LYP"
+mf = scf.RHF(mol)
 mf.kernel()
 resp = tdscf.TDA(mf)
 resp.singlet = True
@@ -72,10 +72,13 @@ qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole
 # set additional parameters for the exchange repulsion + damping of electrostatics
 qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info=None)
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
+Z_MM = np.array([6.0,1.0,1.0])
+qmmm_system.setupCPRepulsion(Z_MM,Z_QM=None)
 
 qmmm_system.mm_system.use_prelim_mpole = False # set to true to use pre-limit form of dipoles in the energy expansion
 qmmm_system.mm_system.prelim_dr = 5.0e-3 # default value is 1.0e-2
 qmmm_system.mm_system.resp_mode_force = "linear"
+
 
 
 # get positions for the QM and MM atoms
@@ -102,7 +105,7 @@ dm = mf.make_rdm1()
 qmmm_system.qm_system.dm_guess = dm
 
 # position of H-O-H H atom in nm
-R_HOH = np.array([0.25,0,0])
+R_HOH = np.array([0.15,0,0])
 # set up a grid of separations in nanometres units
 R_vals = np.linspace(0.5,-0.5,num=21) * 0.01
 energies = np.zeros((3,R_vals.shape[0]))

@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 
 
 # set up the Pyscf QM system using HF/cc-pVDZ
-mol = gto.M(atom='Na 0 0 0',unit="Bohr",basis="cc-pVDZ",charge=1)
+mol = gto.M(atom='Na 0 0 0',unit="Bohr",basis="cc-pVTZ",charge=1)
 mf = scf.RHF(mol)
 
 # Get info MM He system and set up the OpenMM simulation object
@@ -46,6 +46,7 @@ mm_rep_types = [0]
 rep_cutoff = 20.
 # information about how the QM multipole - MM induced dipole interactions are damped (OpenMM units)
 qm_damp = [0.0001**(1./6.)]*len(mol.atom_charges())
+qm_damp = [0.00012**(1./6.)]*len(mol.atom_charges())
 qm_thole = [0.39]*len(mol.atom_charges())
 
 # create the QMMMSystem object that performs the QM/MM energy calculations
@@ -58,6 +59,8 @@ qmmm_system.mm_system.use_prelim_mpole = False
 qmmm_system.mm_system.prelim_dr = 1.0e-3
 qmmm_system.mm_system.test_dipole = 1.0*Data.BOHR_TO_NM
 qmmm_system.mm_system.damp_perm = True
+#Z_MM = np.array([2.0])
+#qmmm_system.setupCPRepulsion(Z_MM,Z_QM=None)
 
 # get positions for the QM and MM atoms
 mm_positions = simulation.context.getState(getPositions=True).getPositions()

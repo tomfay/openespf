@@ -53,6 +53,9 @@ class QMMMSystem:
         # use WCA repulsion
         self.use_wca = False
         
+        # use CP (charge penetration) repulsion correction
+        self.use_cp_rep = False
+        
         # use pre-lim cl force
         self.use_prelim_cl_force = None # None defaults to whatever the mm system does
         
@@ -139,6 +142,12 @@ class QMMMSystem:
             start = timer()
             energy_terms["wca"] = self.getWCARepulsion(get_force=False)
             if self.print_info : print("WCA repulsion:",timer()-start,"s")
+        
+        if self.use_cp_rep:
+            start = timer()
+            energy_terms["cp"] = self.mm_system.getCPRepulsion(get_force=False)
+            #print(energy_terms["cp"])
+            if self.print_info : print("CP repulsion:",timer()-start,"s")
         start = timer()
         qm_energy_terms = self.qm_system.getEnergy(return_terms=True)
         
@@ -200,6 +209,11 @@ class QMMMSystem:
             start = timer()
             energy_terms["wca"],force_terms_qm["wca"],force_terms_mm["wca"] = self.getWCARepulsion(get_force=True)
             if self.print_info : print("WCA repulsion:",timer()-start,"s")
+        
+        if self.use_cp_rep:
+            start = timer()
+            energy_terms["cp"],force_terms_qm["cp"],force_terms_mm["cp"] = self.mm_system.getCPRepulsion(get_force=True)
+            if self.print_info : print("CP repulsion:",timer()-start,"s")
             
         start = timer()
         #E_mm,F_mm = self.mm_system.getEnergyForces(terms="remainder")
@@ -507,4 +521,18 @@ class QMMMSystem:
             return E_rep, F_rep_QM, F_rep_MM
         else:
             return E_rep
+        
+    def setupCPRepulsion(self,Z_MM,Z_QM=None):
+        if Z_QM is None:
+            self.Z_QM = self.qm_system.mol.atom_charges()
+        else:
+            self.Z_QM = Z_QM
+        self.Z_MM = Z_MM
+        
+        self.mm_system.Z_MM = self.Z_MM
+        self.mm_system.Z_QM = self.Z_QM
+        
+        self.use_cp_rep = True
+        
+        return
                               

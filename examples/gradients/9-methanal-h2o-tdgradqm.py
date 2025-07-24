@@ -87,6 +87,8 @@ qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole
 # set additional parameters for the exchange repulsion + damping of electrostatics
 qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info=None)
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
+Z_MM = np.array([2.0,1.0,1.0])
+qmmm_system.setupCPRepulsion(Z_MM,Z_QM=None)
 
 qmmm_system.mm_system.use_prelim_mpole = False # set to true to use pre-limit form of dipoles in the energy expansion
 qmmm_system.mm_system.prelim_dr = 5.0e-3 # default value is 1.0e-2

@@ -38,34 +38,38 @@ mf.max_cycle = 1000
 # Get info MM He system and set up the OpenMM simulation object
 pdb = PDBFile("12-inputs/h2omm.pdb")
 J = 14 # index of MM atom being probed
-pdb = PDBFile("12-inputs/h2omm-small.pdb")
-J = 2 # index of MM atom being probed
+#pdb = PDBFile("12-inputs/h2omm-small.pdb")
+#J = 2 # index of MM atom being probed
 topology = pdb.getTopology() 
 #topology.setUnitCellDimensions((1.5,1.5,1.5))
 positions = pdb.getPositions()
 #forcefield = ForceField("7-inputs/h2o.xml")
 #forcefield = ForceField("7-inputs/iamoeba_zero.xml")
 forcefield = ForceField("amoeba2018.xml")
-system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
-#system = forcefield.createSystem(topology,nonbondedMethod=PME,nonbondedCutoff=1.0*nanometer)
+#forcefield = ForceField("12-inputs/spcfw.xml")
+#system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
+system = forcefield.createSystem(topology,nonbondedMethod=PME,nonbondedCutoff=1.0*nanometer)
 for force in system.getForces():
     if force.getName() == "AmoebaMultipoleForce":
         multipole_force = force
-multipole_force.setMutualInducedTargetEpsilon(1.0e-6)
+        print(force.getEwaldErrorTolerance())
+        force.setEwaldErrorTolerance(force.getEwaldErrorTolerance()*1e-2)
+        #force.setPoalrizationType(force.Direct)
+multipole_force.setMutualInducedTargetEpsilon(1.0e-7)
 multipole_force.setMutualInducedMaxIterations(100)
 #system = forcefield.createSystem(topology,nonbondedMethod=PME,nonbondedCutoff=0.7*nanometer)
-platform = Platform.getPlatformByName("Reference")
 integrator = VerletIntegrator(1e-16*picoseconds)
+# Reference
+#platform = Platform.getPlatformByName("Reference")
+#simulation = Simulation(topology, system, integrator,platform)
+# OpenCL
+platform = Platform.getPlatformByName("OpenCL")
 simulation = Simulation(topology, system, integrator,platform)
-#platform.setPropertyDefaultValue('Precision','double')
-#platform.setPropertyValue(simulation.context,'Precision','double')
+platform.setPropertyDefaultValue('Precision','double')
+platform.setPropertyValue(simulation.context,'Precision','double')
+
 simulation.context.setPositions(positions)
-#print(dir(simulation.context))
-#print(simulation.context.getPlatform().getPropertyNames())
-#print(simulation.context.getPlatform().getPropertyValue(simulation.context,'Precision'))
-#print(simulation.context.getPlatform().setPropertyValue(simulation.context,'Precision','double'))
-#
-#exit()
+
 
 # information about the QM-MM interaction
 multipole_order = 1 # 0=charges, 1=charges+dipoles for QM ESPF multipole operators

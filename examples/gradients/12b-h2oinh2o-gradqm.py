@@ -25,16 +25,12 @@ import matplotlib.pyplot as plt
 
 
 # set up the Pyscf QM system u
-mol = gto.M(atom="7-inputs/methanal.xyz",unit="Angstrom",basis="6-31G*",charge=0,spin=2)
-# The DFT method is chosen to be a long-range-corrected functional with density fitting
-mf = dft.ROKS(mol)
-mf.xc = "HF"
-mol = gto.M(atom="7-inputs/methanal.xyz",unit="Angstrom",basis="6-31G*",charge=0,spin=0)
+mol = gto.M(atom="12-inputs/h2oqm.xyz",unit="Angstrom",basis="6-31G*",charge=0,spin=0)
 mf = dft.RKS(mol)
 xc = "HF"
 mf.xc = xc
 #mf = mf.density_fit(auxbasis="weigendjkfit")
-conv_tol = 1.0e-14
+conv_tol = 1.0e-10
 conv_tol_grad = None
 max_cycle = 1000 
 mf.conv_tol = conv_tol
@@ -43,31 +39,49 @@ mf.max_cycle = max_cycle
 
 
 # Get info MM He system and set up the OpenMM simulation object
-pdb = PDBFile("7-inputs/h2o.pdb")
+pdb = PDBFile("12-inputs/h2omm.pdb")
+J = 0 # index of MM atom being probed
+#pdb = PDBFile("12-inputs/h2omm-small.pdb")
+#J = 0 # index of MM atom being probed
 topology = pdb.getTopology() 
-topology.setUnitCellDimensions((1.5,1.5,1.5))
+#topology.setUnitCellDimensions((1.5,1.5,1.5))
 positions = pdb.getPositions()
+#forcefield = ForceField("7-inputs/h2o.xml")
+#forcefield = ForceField("7-inputs/iamoeba_zero.xml")
 forcefield = ForceField("amoeba2018.xml")
-system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
+#forcefield = ForceField("12-inputs/spcfw.xml")
+#system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
+system = forcefield.createSystem(topology,nonbondedMethod=PME,nonbondedCutoff=1.0*nanometer)
+for force in system.getForces():
+    if force.getName() == "AmoebaMultipoleForce":
+        multipole_force = force
+        print(force.getEwaldErrorTolerance())
+        force.setEwaldErrorTolerance(force.getEwaldErrorTolerance()*1e-1)
+        #force.setPolarizationType(force.Direct)
+multipole_force.setMutualInducedTargetEpsilon(1.0e-7)
+multipole_force.setMutualInducedMaxIterations(500)
 #system = forcefield.createSystem(topology,nonbondedMethod=PME,nonbondedCutoff=0.7*nanometer)
-#platform = Platform.getPlatformByName("Reference")
-platform = Platform.getPlatformByName("OpenCL")
 integrator = VerletIntegrator(1e-16*picoseconds)
-simulation = Simulation(topology, system, integrator,platform)
-print(simulation.context.getPlatform().getPropertyNames())
-print(simulation.context.getPlatform().getPropertyValue(simulation.context,'Precision'))
-platform.setPropertyValue(simulation.context,'Precision','double')
-print(simulation.context.getPlatform().getPropertyValue(simulation.context,'Precision'))
+# Reference
+#platform = Platform.getPlatformByName("Reference")
+#simulation = Simulation(topology, system, integrator,platform)
+# OpenCL
+platform = Platform.getPlatformByName("OpenCL")
+simulation = Simulation(topology, system, integrator,platform,platformProperties={'UseCpuPme':'false'})
+#simulation.context.platform.setPropertyDefaultValue('Precision','double')
+#simulation.context.platform.setPropertyValue(simulation.context,'Precision','double')
+
 simulation.context.setPositions(positions)
 
+
 # information about the QM-MM interaction
-multipole_order = 1 # 0=charges, 1=charges+dipoles for QM ESPF multipole operators
+multipole_order = 0 # 0=charges, 1=charges+dipoles for QM ESPF multipole operators
 multipole_method = "espf" # "espf" or "mulliken" type multipole operators
 # information for the exchange-repulsion model (atomic units)
 rep_type_info = [{"N_eff":4.0+0.669,"R_dens":1.71*Data.ANGSTROM_TO_BOHR,"rho(R_dens)":1.0e-3},
                 {"N_eff":1.0-0.3345,"R_dens":1.54*Data.ANGSTROM_TO_BOHR,"rho(R_dens)":1.0e-3}] 
-mm_rep_types = [0,1,1]
-rep_cutoff = 20.
+mm_rep_types = [0,1,1]*int(len(positions)/3)
+rep_cutoff = 10.
 # information about how the QM multipole - MM induced dipole interactions are damped (OpenMM units)
 qm_damp = [0.001**(1./6.)]*len(mol.atom_charges())
 qm_thole = [0.39]*len(mol.atom_charges())
@@ -79,10 +93,13 @@ qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole
 qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info=None)
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
 
-qmmm_system.mm_system.use_prelim_mpole = False # set to true to use pre-limit form of dipoles in the energy expansion
-#qmmm_system.mm_system.prelim_dr = 5.0e-1*Data.BOHR_TO_NM # default value is 1.0e-1 Bohr
+#qmmm_system.mm_system.use_prelim_mpole = False # set to true to use pre-limit form of dipoles in the energy expansion
+#qmmm_system.mm_system.prelim_dr = 5.0e-2*Data.BOHR_TO_NM # default value is 1.0e-1 Bohr
+qmmm_system.mm_system.resp_mode = "linear"
 qmmm_system.mm_system.resp_mode_force = "linear"
 qmmm_system.mm_system.damp_perm = True
+#qmmm_system.mm_system.test_charge = 1.0
+#qmmm_system.mm_system.test_dipole = 1.0e1*Data.BOHR_TO_NM
 
 #qmmm_system.qm_system.multipole.espf_reg_type = "mulliken"
 #qmmm_system.qm_system.multipole.espf_reg_param = 1.0e-8
@@ -95,7 +112,6 @@ qm_unit = "Bohr" # get QM positions in Bohr
 qmmm_system.setPositions(mm_positions=mm_positions_ref,mm_unit=mm_unit,qm_positions=qm_positions,qm_unit=qm_unit)
 
 # centre the O atom in acrolein
-qm_positions -= qm_positions[1,:]
 qmmm_system.setPositions(qm_positions=qm_positions,qm_unit=qm_unit)
 qm_positions_ref = qm_positions+0
 
@@ -110,11 +126,11 @@ dm = mf.make_rdm1()
 # set as initial guess for QM/MM calculation (not required!)
 #qmmm_system.qm_system.dm_guess = dm
 
-J = 1 # QM atom to move
+#J = 0 # QM atom to move
 # position of H-O-H H atom in nm
-R_HOH = np.array([0.25,0,0])
+R_HOH = np.array([0.0,0,0])
 # set up a grid of separations in nanometres units
-R_vals = np.linspace(0.5,-0.5,num=21) * 0.00125/1.0
+R_vals = np.linspace(0.5,-0.5,num=11) * 0.03/2.0
 energies = np.zeros((3,R_vals.shape[0]))
 forces_qm = np.zeros((3,R_vals.shape[0],qm_positions.shape[0],3))
 forces_mm = np.zeros((3,R_vals.shape[0],mm_positions_ref.shape[0],3))
@@ -212,7 +228,7 @@ print("Difference QM forces")
 for f,f_num in zip(forces_an0,forces_num0):
     print(f[2:-2]-f_num[2:-2])  
 
-print("Difference without MM forces") 
+print("Difference without QM forces") 
 for f,f_num,f0,f_num0 in zip(forces_an,forces_num,forces_an0,forces_num0):
     print(f[2:-2]-f0[2:-2]-f_num[2:-2]+f_num0[2:-2])  
     

@@ -317,7 +317,7 @@ def getESPFMultipoleOperators(mol,grid_coords,weights,l_max=0,block_size=16,add_
     w_D = w.reshape((N_grid,1)) * D
     A_fit = (D.T).dot( w_D )
     A_fit0_diag = np.diag(A_fit)+0.
-    if reg_type in ["mulliken"]:
+    if reg_type in ["mulliken","magnitude"]:
         A_fit[np.diag_indices_from(A_fit)] *= (1.0+reg_param)
     A_fit_inv = inv(A_fit)
     b_fit = np.einsum('ka,knm->anm',w_D,esp,optimize=True)
@@ -552,7 +552,7 @@ def getESPFMultipoleOperatorAtmDeriv(mol,J,grid_coords,fit_vars,gradJ_w,grad_D,i
     start = timer()
     #gradJ_A_fit = getGradAfitESP(gradJ_D,gradJ_w,D,w,l_max)
     gradJ_A_fit = getGradAfitESPOpt(gradJ_D_opt,gradJ_w,D,w,w_D)
-    if reg_type in ["mulliken"]:
+    if reg_type in ["mulliken","magnitude"]:
         gradJ_A_fit0_diag = np.einsum('xaa->xa',gradJ_A_fit)
         np.einsum('xaa->xa',gradJ_A_fit)[:,:] += reg_param * gradJ_A_fit0_diag
     if print_info: print("gradJ_A_fit time:",timer()-start,"s")

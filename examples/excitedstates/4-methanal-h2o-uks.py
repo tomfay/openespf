@@ -10,7 +10,7 @@ two point charges charge = +/- dipole/dr at x = +/- dr/2. This resolves an error
 '''
 
 # import pyscf for setting up the QM part of the calculation
-from pyscf import gto, scf, dft
+from pyscf import gto, scf, dft, tddft
 # import OpenMM for setting up the MM part of the calculation
 from openmm.app import *
 from openmm import *
@@ -25,12 +25,22 @@ import matplotlib.pyplot as plt
 
 
 
+
 # set up the Pyscf QM system u
-mol = gto.M(atom="6-inputs/methanal.xyz",unit="Angstrom",basis="pc-1",charge=0)
-mf = dft.RKS(mol)
-#mol = gto.M(atom="6-inputs/methanal.xyz",unit="Angstrom",basis="pc-1",charge=0,spin=2)
-#mf = dft.ROKS(mol)
-mf.xc = "HF"
+#mol = gto.M(atom="6-inputs/methanal.xyz",unit="Angstrom",basis="pc-1",charge=0)
+#mf = dft.RKS(mol)
+mol = gto.M(atom="4-inputs/methanal.xyz",unit="Angstrom",basis="pc-0",charge=0,spin=2)
+mf = dft.UKS(mol)
+mf.xc = "PBE0"
+mf.kernel()
+resp = tddft.TDA(mf)
+
+resp.nstates = 5
+resp.kernel()
+resp.verbose = 4
+resp.analyze()
+resp.verbose = 2
+#exit()
 
 #mf.xc = "PBE0"
 #mf = mf.density_fit(auxbasis="weigendjkfit")
@@ -38,7 +48,7 @@ mf.xc = "HF"
 
 
 # Get info MM He system and set up the OpenMM simulation object
-pdb = PDBFile("6-inputs/h2o.pdb")
+pdb = PDBFile("4-inputs/h2o.pdb")
 topology = pdb.getTopology() 
 positions = pdb.getPositions()
 forcefield = ForceField("amoeba2018.xml")
@@ -63,7 +73,7 @@ qm_thole = [0.39]*len(mol.atom_charges())
 #qm_thole = [2.13]*len(mol.atom_charges())
 
 # create the QMMMSystem object that performs the QM/MM energy calculations
-qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole_method=multipole_method)
+qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole_method=multipole_method,qm_resp=resp)
 # set additional parameters for the exchange repulsion + damping of electrostatics
 qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info=None)
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
@@ -104,7 +114,7 @@ qmmm_system.qm_system.dm_guess = dm
 R_HOH = np.array([0.0,0,0])
 # set up a grid of separations in nanometres units
 R_vals = np.linspace(0.15,0.5,num=40) 
-energies = np.zeros((R_vals.shape[0],))
+energies = np.zeros((R_vals.shape[0],1+resp.nstates))
 forces_qm = np.zeros((3,R_vals.shape[0],qm_positions.shape[0],3))
 forces_mm = np.zeros((3,R_vals.shape[0],mm_positions_ref.shape[0],3))
 x = 0 
@@ -128,11 +138,11 @@ for n,R in enumerate(R_vals):
     #qmmm_system.qm_system.dm_guess = dm
     # save enegy
     energies[n] = E_qmmm + 0
-    int_energies.append( qmmm_system.qm_system.getInteractionEnergyDecomposition() )
-    mu.append(qmmm_system.qm_system.mf_qmmm.dip_moment())
+    #int_energies.append( qmmm_system.qm_system.getInteractionEnergyDecomposition() )
+    #mu.append(qmmm_system.qm_system.mf_qmmm.dip_moment())
     
 
-mus = np.linalg.norm(np.array(mu),axis=1)
+#mus = np.linalg.norm(np.array(mu),axis=1)
 
 print("Interaction energies [Hartree]:")
 print(energies-E_qmmm_0)
@@ -146,6 +156,8 @@ plt.xlabel("Separation [Angstrom]")
 plt.ylabel("Energy [mH]")
 plt.legend()
 plt.show()
+
+exit()
 
 # plot energies 
 plt.rc('font', family='Helvetica') 

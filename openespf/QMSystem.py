@@ -290,6 +290,18 @@ class QMSystem:
                 #self.qs_einpath = True
             q = np.einsum('bkl,nlk->nb',self.Q,dm,optimize=self.qs_einpath) # re-defined for consistency with pyscf
             return self.jdreem_pre*np.einsum('Aij,nA->nij',self.u2_Q,q)
+        elif len(dm.shape)==4:
+            #q = np.einsum('Aij,nij->nA',self.Q,dm)
+            #j = np.sum(np.einsum('nA,Aij->nij',q,self.UQ),axis=0)
+            #return np.array([j,j])
+            #return np.einsum('nA,Aij->nij',q,self.u2_Q)
+            if not hasattr(self,'qs_einpath'):
+                self.qs_einpath = np.einsum_path('bkl,nmlk->nmb',self.Q,dm,optimize="optimal")[0]
+                #self.qs_einpath = True
+            q = np.einsum('bkl,nmlk->nmb',self.Q,dm,optimize=self.qs_einpath) # re-defined for consistency with pyscf
+            return self.jdreem_pre*np.einsum('Aij,nmA->nmij',self.u2_Q,q)
+        else:
+            print('Error: dm type not recognised. type(dm)=',type(dm))
 
     def get_k_dreem(self,dm,vk_scal=1.0):
         '''
@@ -335,6 +347,20 @@ class QMSystem:
                 self.ksdreem_einpath = np.einsum_path('Ail,nAlj->nij',self.u2_Q,dmQ,optimize="optimal")[0]
                 #self.ksdreem_einpath = False 
             return self.kdreem_pre*(1.0/vk_scal)*np.einsum('Ail,nAlj->nij',self.u2_Q,dmQ,optimize=self.ksdreem_einpath)
+        elif len(dm.shape)==4:
+            #dmQ = np.einsum('njk,Bkl->nBjl',dm,self.Q)
+            #return (1.0/vk_scal)*np.einsum('Aij,nAjl->nil',self.u2_Q,dmQ)
+            if not hasattr(self,'dmsQ_einpath'):
+                #self.dmsQ_einpath = np.einsum_path('nlk,Bkj->nBlj',dm,self.Q,optimize="optimal")[0]
+                self.dmsQ_einpath = False
+               
+            dmQ =  np.einsum('nmlk,Bkj->nmBlj',dm,self.Q,optimize=self.dmsQ_einpath)
+            if not hasattr(self,'ksdreem_einpath'):
+                self.ksdreem_einpath = np.einsum_path('Ail,nmAlj->nmij',self.u2_Q,dmQ,optimize="optimal")[0]
+                #self.ksdreem_einpath = False 
+            return self.kdreem_pre*(1.0/vk_scal)*np.einsum('Ail,nmAlj->nmij',self.u2_Q,dmQ,optimize=self.ksdreem_einpath)
+        else:
+            print('Error: dm type not recognised. type(dm)=',type(dm))
     
     def get_jk_mod(self, mol=None, dm=None, hermi=1, with_j=True, with_k=True,
                omega=None,vk_scal=1.0):
@@ -347,7 +373,13 @@ class QMSystem:
         vj, vk = self.mf.get_jk(mol=mol, dm=dm, hermi=hermi, with_j=with_j, with_k=with_k, omega=omega)
         
         if with_j:
-            vj += self.get_j_dreem(dm)
+            try:
+                vj += self.get_j_dreem(dm)
+            except:
+                print(dm.shape)
+                print('vj=',vj)
+                print('vj_dreem=',self.get_j_dreem(dm))
+                exit()
         if with_k:
             if vk_scal is not None:
                 vk += self.get_k_dreem(dm,vk_scal=vk_scal)
