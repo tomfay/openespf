@@ -27,12 +27,12 @@ import matplotlib.pyplot as plt
 #mol = gto.M(atom="6-inputs/methanal.xyz",unit="Angstrom",basis="pc-1",charge=0)
 #mf = dft.RKS(mol)
 mol = gto.M(atom="4-inputs/methanal.xyz",unit="Angstrom",basis="pc-0",charge=0,spin=2)
-mol = gto.M(atom="4-inputs/methanal.xyz",unit="Angstrom",basis="pc-1",charge=0,spin=0)
-mf = dft.RKS(mol)
-mf.xc = "HF"
+#mol = gto.M(atom="4-inputs/methanal.xyz",unit="Angstrom",basis="pc-1",charge=0,spin=0)
+mf = dft.UKS(mol)
+mf.xc = "cam-b3lyp"
 mf.kernel()
 resp = tddft.TDA(mf)
-nstates = 2
+nstates = 5
 resp.nstates = nstates
 resp.kernel()
 resp.verbose = 4
@@ -59,6 +59,13 @@ platform = Platform.getPlatformByName("Reference")
 integrator = VerletIntegrator(1e-16*picoseconds)
 simulation = Simulation(topology, system, integrator,platform)
 simulation.context.setPositions(positions)
+
+# get the reference QM and MM energies
+mf.kernel()
+E_qm = mf.energy_tot() # in hartree
+E_mm = simulation.context.getState(getEnergy=True).getPotentialEnergy()._value * Data.KJMOL_TO_HARTREE # in hartree
+E_qmmm_0 = E_qm + E_mm
+print("E_qmmm_0 = ", E_qmmm_0)
 
 # information about the QM-MM interaction
 multipole_order = 1 # 0=charges, 1=charges+dipoles for QM ESPF multipole operators
@@ -99,11 +106,7 @@ qm_positions -= qm_positions[1,:]
 qmmm_system.setPositions(qm_positions=qm_positions,qm_unit=qm_unit)
 
 
-# get the reference QM and MM energies
-mf.kernel()
-E_qm = mf.energy_tot() # in hartree
-E_mm = simulation.context.getState(getEnergy=True).getPotentialEnergy()._value * Data.KJMOL_TO_HARTREE # in hartree
-E_qmmm_0 = E_qm + E_mm
+
 
 # get density matrix from calculation
 dm = mf.make_rdm1()
@@ -147,10 +150,12 @@ for n,R in enumerate(R_vals):
 
 print("Interaction energies [Hartree]:")
 print(energies-E_qmmm_0)
+
 #np.savetxt("./6-inputs/int-energies-nodamp.dat",np.vstack((R_vals,energies-E_qmmm_0,mus)).T,delimiter=',',header='Separation [nm],Interaction energy [Hartree],Dipole moment [au]')
 E_refs = np.zeros((nstates+1))
 E_refs[0] = E_qmmm_0
 E_refs[1:] = E_qmmm_0+E_exc
+print("E_refs:",E_refs-E_qmmm_0)
 
 # plot energies 
 plt.rc('font', family='Helvetica') 
