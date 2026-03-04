@@ -10,7 +10,7 @@ pip install --prefer-binary pyscf
 ```
 and for OpenMM:
 ```
-conda -c conda-forge openmm
+conda install -c conda-forge openmm
 ```
 Then you can run:
 ```
