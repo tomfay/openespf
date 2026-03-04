@@ -34,5 +34,6 @@ The following features are available:
 * Periodic boundary conditions for all methods.
 * QM/MM interaction energy analysis for SCF methods.
 * Pauli repulsion treated with the exchange-repulsion model.
+* Mean field treatment of polarisable QM/MM a la J. Chem. Theory Comput. 2012, 8, 11, 4153–4165 (https://doi.org/10.1021/ct3005062)
 
 

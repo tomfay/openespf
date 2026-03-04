@@ -105,11 +105,20 @@ class QMSystem:
         # copy the scf object - methods *should* be modifiable in mf_qmmm without modifying original
         #self.mf_qmmm = (deepcopy(self.mf))
         #self.mf_int = (deepcopy(self.mf))
+        #print("" , self.mf._numint.rsh_and_hybrid_coeff(self.mf.xc, spin=self.mf.mol.spin))
         self.mf_qmmm = self.mf.copy()
         self.mf_int = self.mf.copy()
+        if hasattr(self.mf,"_numint"):
+            self.mf_qmmm._numint = copy(self.mf._numint)
+            self.mf_int._numint = copy(self.mf._numint)
+        #print(self.mf_qmmm._numint.rsh_and_hybrid_coeff(self.mf.xc, spin=self.mf.mol.spin))
         
         self.mf_int.xc = "HF"
         self.mf_int.omega = 0.0
+        #print(self.mf.xc,self.mf_qmmm.xc,self.mf_int.xc)
+        #print(self.mf.omega,self.mf_qmmm.omega,self.mf_int.omega)
+        
+        #print(self.mf_qmmm._numint.rsh_and_hybrid_coeff(self.mf.xc, spin=self.mf.mol.spin))
     
         
         # get the multipole moment operators
@@ -127,7 +136,7 @@ class QMSystem:
         N_QM = len(Z) 
         
         # set up the polarization energy expansion
-        if self.int_method == "dreem":
+        if self.int_method in ["dreem","mf"]:
             # first get the u_0 term from the nuclear charges: u_0 = Σ_Α Z_A U_1A + (1/2) Σ_Α,Β Z_A U_2AB Z_B 
             u_nuc_ind = np.einsum('B,AB->A',Z,self.U_2[0:N_QM,0:N_QM])
             u_0 = np.einsum('A,A', (self.U_1[0:N_QM] + 0.5*u_nuc_ind) ,Z) 
@@ -141,7 +150,7 @@ class QMSystem:
             self.u_2 = u_2
         
         # set up the correction to the one electron Hamiltonian from embedding
-        if self.int_method == "dreem":
+        if self.int_method in ["dreem","mf"]:
             # first the u_0 term
             #h_int = (u_0/self.mf.mol.nelectron) * self.S
             # the induction term
@@ -149,7 +158,9 @@ class QMSystem:
             # finally get the self-energy term
             self.Q_Sinv = np.einsum('ank,km->anm',self.Q,self.S_inv)
             self.u2_Q = np.einsum('ab,bnm->anm',u_2,self.Q)
-            h_int += + 0.5*np.einsum('ank,akm->nm',self.Q_Sinv,self.u2_Q)
+            # we only add the (1/2) Q_a Q_b u_ab for DREEM, not for MF
+            if self.int_method in ["dreem"]:
+                h_int += + 0.5*np.einsum('ank,akm->nm',self.Q_Sinv,self.u2_Q)
             # combine the interaction and QM system hamiltonians
             h_qm = self.mf.get_hcore()
             h_qmmm = h_qm + h_int
@@ -176,15 +187,16 @@ class QMSystem:
                 self.mf_qmmm.get_jk = lambda *args,**kwargs: self.get_jk_mod(*args,**kwargs,vk_scal=1.0)
             elif self.mf_qmmm._numint.libxc.is_hybrid_xc(self.mf.xc):
                 omega, alpha, hyb = self.mf_qmmm._numint.rsh_and_hybrid_coeff(self.mf.xc, spin=self.mf.mol.spin)
+                #print("self.mf.xc", self.mf.xc, "omega, alpha, hyb", omega, alpha, hyb)
                 # scaling of vk_dreem depends on method
                 if omega == 0:
                     vk_scal = hyb
                 elif alpha == 0 :
                     vk_scal = hyb
                 elif hyb == 0 :
-                    vk_scal = 1.0/alpha
+                    vk_scal = alpha
                 else: 
-                    vk_scal = 1.0/alpha
+                    vk_scal = alpha
                 self.mf_qmmm.get_jk = lambda *args,**kwargs: self.get_jk_mod(*args,**kwargs,vk_scal=vk_scal)
             else:
                 xc_split = self.mf.xc.split(',') 
@@ -196,9 +208,36 @@ class QMSystem:
                 #self.mf.xc = xc_new 
                 self.mf_qmmm.xc = xc_new
                 self.mf_qmmm.get_jk = lambda *args,**kwargs: self.get_jk_mod(*args,**kwargs,vk_scal=None)
-            
-                
-                
+        
+        # set up MF (mean field) correction to get_jk
+        if self.int_method == "mf" and self.dreem_method == "get_veff":
+            print("ERROR: Mean field must use get_jk version of implementation")
+        if self.int_method == "mf" and self.dreem_method == "get_jk":
+            self.mf_qmmm.get_jk = lambda *args,**kwargs: self.get_jk_mod_mf(*args,**kwargs)
+            #if "HF" in self.mf.__class__.__name__ :
+            #    self.mf_qmmm.get_jk = lambda *args,**kwargs: self.get_jk_mod_mf(*args,**kwargs)
+            #elif self.mf_qmmm._numint.libxc.is_hybrid_xc(self.mf.xc):
+            #    omega, alpha, hyb = self.mf_qmmm._numint.rsh_and_hybrid_coeff(self.mf.xc, spin=self.mf.mol.spin)
+            #    # scaling of vk_dreem depends on method
+            #    if omega == 0:
+            #        vk_scal = hyb
+            #    elif alpha == 0 :
+            #        vk_scal = hyb
+            #    elif hyb == 0 :
+            #        vk_scal = alpha
+            #    else: 
+            #        vk_scal = alpha
+            #    self.mf_qmmm.get_jk = lambda *args,**kwargs: self.get_jk_mod_mf(*args,**kwargs)
+            #else:
+            #    xc_split = self.mf.xc.split(',') 
+            #    if len(xc_split) == 2:
+            #        xc_split[0] += "+1.0*HF"
+            #        xc_new = xc_split[0] + xc_split[1]
+            #    else:
+            #        xc_new = self.mf.xc + "+1.0*HF"
+            #    #self.mf.xc = xc_new 
+            #    self.mf_qmmm.xc = xc_new
+            #    self.mf_qmmm.get_jk = lambda *args,**kwargs: self.get_jk_mod_mf(*args,**kwargs)
             
         # add modifications to the system for the repulsion term
         if self.rep_method == "exch":
@@ -231,6 +270,14 @@ class QMSystem:
         elif self.int_method == "dreem" and self.dreem_method == "get_jk":
             # no modification should be needed if the methodf is "get_jk" need to check this
             self.resp_qmmm = self.resp_qmmm
+            
+        if self.int_method == "mf" and self.dreem_method == "get_veff":
+            # modify the response object
+            print("ERROR: mf interaction not available in get_veff implementation")
+        elif self.int_method == "mf" and self.dreem_method == "get_jk":
+            # no modification should be needed if the methodf is "get_jk" need to check this
+            self.resp_qmmm = self.resp_qmmm
+            
         return
 
     def get_veff_dreem(self,mf_obj,dm):
@@ -387,6 +434,29 @@ class QMSystem:
                 vk = self.get_k_dreem(dm)
         
         return vj, vk
+    
+    def get_jk_mod_mf(self, mol=None, dm=None, hermi=1, with_j=True, with_k=True,
+               omega=None):
+        #print({**locals()})
+        if mol is None: mol = self.mf_qmmm.mol
+        if dm is None: dm = self.mf_qmmm.make_rdm1()
+        #print("omega = " , omega, "hyb = ", hyb)
+        #print("omega = ",omega,"hyb = ",hyb,"get_j,get_k = ",with_j,with_k)
+        #vj, vk = self.mf.get_jk(mol=mol, dm=dm, hermi=hermi, with_j=with_j, with_k=with_k, omega=omega)
+        vj, vk = self.mf.get_jk(mol=mol, dm=dm, hermi=hermi, with_j=with_j, with_k=with_k, omega=omega)
+        
+        # for the MEAN field method the correction to vj is same as dreem, but not vk correction
+        if with_j:
+            try:
+                vj += self.get_j_dreem(dm)
+            except:
+                print(dm.shape)
+                print('vj=',vj)
+                print('vj_dreem=',self.get_j_dreem(dm))
+                print('ERROR: failure to build vj for MF')
+                exit()
+        
+        return vj, vk
         
   
     def setPolarizationEnergyResp(self,pol_resp):
@@ -451,7 +521,8 @@ class QMSystem:
         self.mf_qmmm.kernel(dm0=self.dm_guess)
         # get the energy
         E = self.mf_qmmm.energy_tot()
-    
+        
+        #print(self.mf_qmmm.scf_summary)
         
         # get response energy
         if self.resp is not None:

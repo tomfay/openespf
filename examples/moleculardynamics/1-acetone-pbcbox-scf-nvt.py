@@ -98,7 +98,7 @@ qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
 qmmm_system.mm_system.damp_perm =  True
 
-qmmm_system.setupWCARepulsion(radius_type="vdw",gamma=0.6,R0=0.,epsilon=1.0e-1)
+#qmmm_system.setupWCARepulsion(radius_type="vdw",gamma=0.6,R0=0.,epsilon=1.0e-1)
 
 # get positions for the QM and MM atoms
 mm_positions = simulation.context.getState(getPositions=True).getPositions(asNumpy=True)._value

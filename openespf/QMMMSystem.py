@@ -126,7 +126,7 @@ class QMMMSystem:
         # set up a dictionary for decomposition of the energy terms
         energy_terms = {} 
         # get the MM energy
-        if self.int_method == "dreem":
+        if self.int_method in ["dreem","mf"]:
             energy_terms["mm electrostatics"] = pol_resp["U_0"]
         else:
             energy_terms["mm electrostatics"] = self.mm_system.getElectrostaticEnergy()
