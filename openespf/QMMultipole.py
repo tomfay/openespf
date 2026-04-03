@@ -4,6 +4,7 @@ from scipy.optimize import fsolve
 from copy import deepcopy, copy
 from pyscf import gto, scf, ao2mo, dft, lib
 from pyscf.data import radii
+from concurrent.futures import ThreadPoolExecutor
 
 from timeit import default_timer as timer
 
@@ -267,6 +268,8 @@ def getESPFGrid(mol,n_ang,n_rad,rad_method="vdw",ang_method="lebedev",rad_scal=1
 
 def getESPMat(mol,grid_coords,block_size=16):
     N_grid = grid_coords.shape[0]
+    if block_size is None:
+        block_size = N_grid
     N_AO = mol.nao
     N_block = int(np.ceil(N_grid/block_size))
     esp = np.zeros((N_grid,N_AO,N_AO))
@@ -288,7 +291,7 @@ def getIPESPMat(mol,grid_coords,block_size=16):
     return ipesp
 
 def getESPFMultipoleOperators(mol,grid_coords,weights,l_max=0,block_size=16,add_correction=True,return_fit_vars=False,
-                              S=None,r_int=None,reg_type="none",reg_param=0.0):
+                              S=None,r_int=None,reg_type="none",reg_param=0.0,store_esp=True):
     '''
     gets ESPF charge operators.
     '''
@@ -308,8 +311,6 @@ def getESPFMultipoleOperators(mol,grid_coords,weights,l_max=0,block_size=16,add_
     # weights of grid points
     w = weights
     
-    # get the ESP potential operators at grid points
-    esp = getESPMat(mol,grid_coords,block_size) 
     
     #reg = 1.0e-7
     
@@ -320,7 +321,27 @@ def getESPFMultipoleOperators(mol,grid_coords,weights,l_max=0,block_size=16,add_
     if reg_type in ["mulliken","magnitude"]:
         A_fit[np.diag_indices_from(A_fit)] *= (1.0+reg_param)
     A_fit_inv = inv(A_fit)
-    b_fit = np.einsum('ka,knm->anm',w_D,esp,optimize=True)
+    if store_esp:
+        # get the ESP potential operators at grid points
+        esp = getESPMat(mol,grid_coords,block_size) 
+        b_fit = np.einsum('ka,knm->anm',w_D,esp,optimize=True)
+    else:
+        # if esp is not stored esp is evaluated in blocks of size "block_size"
+        N_block = int(np.ceil(N_grid/block_size))
+        b_fit = np.zeros([N_Q,N_AO,N_AO])
+        for i in range(0,N_block):
+            start = i*block_size
+            end = min(start+block_size,N_grid)
+            esp = -mol.intor('int1e_grids',grids=grid_coords[start:end,:])
+            #b_fit += lib.einsum('ka,knm->anm',w_D[start:end],esp)
+            # optimisation
+            K = end - start
+            b_partial_flat = w_D[start:end].T @ esp.reshape(K, -1)
+            b_fit += b_partial_flat.reshape(N_Q, N_AO, N_AO)
+        esp = None
+        
+        
+    
     #D_esp = np.einsum('ka,knm',D,esp)
     if reg_type == "mulliken":
         Q_mulliken = getMullikenMultipoleOperators(mol,l_max=l_max,S=S,r_int=r_int)
@@ -356,6 +377,7 @@ def getESPFMultipoleOperators(mol,grid_coords,weights,l_max=0,block_size=16,add_
     else:
         return Q
     
+
 def getESPMatrix(grid_coords,R,l_max):
     '''
     gets the ESP matrix of ESP at grid coords getd by point multipoles at R.
@@ -1013,6 +1035,7 @@ class QMMultipole:
         self.grid_block_size = 16
         self.grad_D = None
         self.ipesp = None
+        self.store_esp = True
         
         # espf regularisation
         self.espf_reg_type = None
@@ -1095,7 +1118,7 @@ class QMMultipole:
         self.evaluateMultipoleIntegrals(mol=mol)
         Q,fit_vars = getESPFMultipoleOperators(mol,grid_coords,weights,l_max=self.multipole_order,
                                                add_correction=self.corr_espf,return_fit_vars=True,S=self.S,r_int=self.r_int,
-                                               block_size=self.grid_block_size,reg_type=self.espf_reg_type,reg_param=self.espf_reg_param)
+                                               block_size=self.grid_block_size,reg_type=self.espf_reg_type,reg_param=self.espf_reg_param,store_esp=self.store_esp)
         self.espf_fit_vars = fit_vars
         self.Q = Q 
         return 
