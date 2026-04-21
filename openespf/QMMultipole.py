@@ -5,8 +5,14 @@ from copy import deepcopy, copy
 from pyscf import gto, scf, ao2mo, dft, lib
 from pyscf.data import radii
 from concurrent.futures import ThreadPoolExecutor
-
 from timeit import default_timer as timer
+try:
+    import pytblis
+    # Assign it to a custom, short name like 'teinsum' (tensor einsum)
+    np.einsum = pytblis.einsum 
+except ImportError:
+    # Fallback to standard numpy
+    np.einsum = np.einsum
 
 '''
 This module contains stand alone implementations of the multipole operators.
@@ -244,6 +250,11 @@ def getESPFGrid(mol,n_ang,n_rad,rad_method="vdw",ang_method="lebedev",rad_scal=1
         r_vdw = radii.VDW[Z]
         r_grid = rad_scal * np.arange(1,n_rad+1)
         grid_rad = r_vdw.reshape((N_atm,1)) * r_grid.reshape((1,n_rad))
+    elif rad_method == "vdw2":
+        # vdw radii of the atoms this version is closer to the CHELP/Merz-Kollman style of grid
+        r_vdw = radii.VDW[Z]
+        r_grid = np.hstack([np.array([1]),1.0+rad_scal * np.arange(1,n_rad+1)])
+        grid_rad = r_vdw.reshape((N_atm,1)) * r_grid.reshape((1,n_rad))
     else:
         raise Exception("Radial grid method ",rad_method," not recognised.")
         
@@ -333,11 +344,11 @@ def getESPFMultipoleOperators(mol,grid_coords,weights,l_max=0,block_size=16,add_
             start = i*block_size
             end = min(start+block_size,N_grid)
             esp = -mol.intor('int1e_grids',grids=grid_coords[start:end,:])
-            #b_fit += lib.einsum('ka,knm->anm',w_D[start:end],esp)
+            b_fit += np.einsum('ka,knm->anm',w_D[start:end],esp)
             # optimisation
-            K = end - start
-            b_partial_flat = w_D[start:end].T @ esp.reshape(K, -1)
-            b_fit += b_partial_flat.reshape(N_Q, N_AO, N_AO)
+            #K = end - start
+            #b_partial_flat = w_D[start:end].T @ esp.reshape(K, -1)
+            #b_fit += b_partial_flat.reshape(N_Q, N_AO, N_AO)
         esp = None
         
         
@@ -1005,8 +1016,136 @@ def calculateNumGrad(func,J,R,dx=1e-3):
 
     return np.array(gradJ_func)
 
+def getSimpleDFBasis(mol,gamma=1.0):
+    '''
+    This returns the set of gaussian parameters for the density-fitted charges
+    '''
+    # empty auxiliary mol with no basis functions
+    mol_aux = mol.copy()
+    mol_aux.basis = None
+    mol_aux.build()
+    
+    # get vdw radii 
+    R_vdw = radii.VDW[mol_aux.atom_charges()]
+    #R_vdw = radii.COVALENT[mol_aux.atom_charges()]
+    # decay parameters for auxiliary gaussians
+    beta = 1/((gamma*R_vdw)**2)
+    # normalisation coefficients so that int C_A g_A d^3r = 1
+    C = 1.0/( ( (2*beta/np.pi)**(0.75) ) * ( (np.pi/beta)**(1.5) ))
+    # add the basis functions to the mol_aux object
+    new_atom_list = []
+    custom_basis = {}
+    # 2. Loop over every atom k in the original molecule
+    for k in range(mol.natm):
+        element = mol.elements[k]
+        coord = mol.atom_coords()[k]
+        # Create a unique label for the atom (e.g., 'O:0', 'H:1', 'H:2')
+        # PySCF reads the true element from the letters before the colon
+        unique_label = f"{element}:{k}" 
+        new_atom_list.append((unique_label, coord))
 
+        # Define the single s-type primitive Gaussian
+        # Format: [ [l, (alpha, contraction_coeff)] ]
+        # l=0 for s-type. Contraction coeff is 1.0 since it's uncontracted.
+        custom_basis[unique_label] = [[0, [beta[k], 1.0]]]
 
+    # Build the new molecule with the uniquely mapped basis
+    mol_aux = gto.M(
+        atom=new_atom_list,
+        basis=custom_basis,
+        charge=mol.charge,
+        spin=mol.spin,
+        unit='Bohr' # or 'Angstrom', matching your original mol
+    )
+    mol_aux.build()
+             
+    return beta, C, mol_aux
+
+def getFlexibleDFBasis(mol,gamma=[1.0],l_max=0):
+    '''
+    This returns the set of gaussian parameters for the density-fitted charges
+    '''
+    # empty auxiliary mol with no basis functions
+    mol_aux = mol.copy()
+    mol_aux.basis = None
+    mol_aux.build()
+    
+    # get vdw radii 
+    R_vdw = radii.VDW[mol_aux.atom_charges()]
+    #R_vdw = radii.COVALENT[mol_aux.atom_charges()]
+    # decay parameters for auxiliary gaussians
+    beta_0 = 1/((R_vdw)**2)
+    beta = np.outer(beta_0 , 1.0/(np.array(gamma)**2))
+    # normalisation coefficients so that int C_A g_A d^3r = 1
+    C = 1.0/( ( (2*beta/np.pi)**(0.75) ) * ( (np.pi/beta)**(1.5) ))
+    # add the basis functions to the mol_aux object
+    new_atom_list = []
+    custom_basis = {}
+    # 2. Loop over every atom k in the original molecule
+    for k in range(mol.natm):
+        element = mol.elements[k]
+        coord = mol.atom_coords()[k]
+        # Create a unique label for the atom (e.g., 'O:0', 'H:1', 'H:2')
+        # PySCF reads the true element from the letters before the colon
+        unique_label = f"{element}:{k}" 
+        new_atom_list.append((unique_label, coord))
+
+        # Define the single s-type primitive Gaussian
+        # Format: [ [l, (alpha, contraction_coeff)] ]
+        # l=0 for s-type. Contraction coeff is 1.0 since it's uncontracted.
+        custom_basis[unique_label] = [[0, [beta_l, 1.0]] for beta_l in beta[k,:]]
+        if l_max>0:
+            for l in range(1,l_max+1):
+                custom_basis[unique_label] += [[l, [beta_l, 1.0]] for beta_l in beta[k,:]]
+
+    # Build the new molecule with the uniquely mapped basis
+    mol_aux = gto.M(
+        atom=new_atom_list,
+        basis=custom_basis,
+        charge=mol.charge,
+        spin=mol.spin,
+        unit='Bohr' # or 'Angstrom', matching your original mol
+    )
+    mol_aux.build()
+             
+    return beta, C, mol_aux
+
+def solve_kkt_tensor(A, b, C, d):
+    """
+    Solves the constrained minimization problem over the last dimension of a tensor.
+    
+    A: (N, N) matrix
+    b: (..., N) tensor
+    C: (N, M) constraint matrix
+    d: (..., M) tensor of constraint values
+    """
+    N = A.shape[0]
+    M = C.shape[1]
+    
+    # 1. Build the KKT Matrix: Shape (N+M, N+M)
+    top_row = np.hstack((A, C))
+    bottom_row = np.hstack((C.T, np.zeros((M, M))))
+    kkt_mat = np.vstack((top_row, bottom_row))
+    
+    # 2. Build the RHS Tensor: Shape (..., N+M)
+    # We append the constraint conditions to the last dimension of b
+    rhs = np.concatenate((b, d), axis=-1)
+    
+    # 3. Solve the system
+    # Method A: Direct inverse mapping to your sum notation 
+    # x_{...i} = \sum_j (KKT^-1)_ij rhs_{...j}
+    kkt_inv = np.linalg.inv(kkt_mat)
+    solution = np.einsum('ij,...j->...i', kkt_inv, rhs)
+    
+    # Method B: More numerically stable solver (equivalent result)
+    # rhs_flat = rhs.reshape(-1, N+M).T
+    # sol_flat = np.linalg.solve(kkt_mat, rhs_flat).T
+    # solution = sol_flat.reshape(rhs.shape)
+    
+    # 4. Extract x, dropping the M Lagrange multipliers from the last axis
+    x = solution[..., :N]
+    
+    return x
 
 class QMMultipole:
     '''
@@ -1150,3 +1289,13 @@ class QMMultipole:
         '''
     
         return deriv_Q
+    
+    def getESPGrid(self,mol=None):
+        '''
+        Just returns grid coordinates, associated atoms, and the weights. Useful for analysis
+        '''
+        if mol is None:
+            mol = self.mol
+        grid_coords,grid_atms = getESPFGrid(mol,self.n_ang,self.n_rad,rad_scal=self.rad_scal,rad_method=self.rad_grid_method,ang_method=self.ang_grid_method)
+        weights = getGridWeights(mol,grid_coords,weight_mode=self.weight_mode,hard_cut_vdw_scal=self.hard_cut_scal,sigma=self.smooth_sigma,smooth_func=self.weight_smooth_func)
+        return grid_coords, grid_atms, weights

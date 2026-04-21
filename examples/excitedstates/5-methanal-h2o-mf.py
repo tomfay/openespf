@@ -19,19 +19,23 @@ import openespf.Data as Data
 #import numpy and matplotlib for plotting
 import numpy as np
 import matplotlib.pyplot as plt
-
-
+from cycler import cycler
+default_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+line_styles = ['-', '--', ':', '-.']
+new_cycle = cycler(color=default_colors) * cycler(linestyle=line_styles)
+plt.rc('axes', prop_cycle=new_cycle)
 
 
 # set up the Pyscf QM system u
 #mol = gto.M(atom="6-inputs/methanal.xyz",unit="Angstrom",basis="pc-1",charge=0)
 #mf = dft.RKS(mol)
-mol = gto.M(atom="4-inputs/methanal.xyz",unit="Angstrom",basis="pc-0",charge=0,spin=2)
-#mol = gto.M(atom="4-inputs/methanal.xyz",unit="Angstrom",basis="pc-1",charge=0,spin=0)
-mf = dft.UKS(mol)
-mf.xc = "cam-b3lyp"
+#mol = gto.M(atom="4-inputs/methanal.xyz",unit="Angstrom",basis="pc-0",charge=0,spin=2)
+mol = gto.M(atom="4-inputs/methanal.xyz",unit="Angstrom",basis="pc-0",charge=0,spin=0)
+mf = dft.RKS(mol)
+mf.xc = "hf"
 mf.kernel()
 resp = tddft.TDA(mf)
+
 nstates = 5
 resp.nstates = nstates
 resp.kernel()
@@ -81,7 +85,7 @@ qm_thole = [0.39]*len(mol.atom_charges())
 #qm_thole = [2.13]*len(mol.atom_charges())
 
 # create the QMMMSystem object that performs the QM/MM energy calculations
-qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole_method=multipole_method,qm_resp=resp,int_method="mf")
+qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole_method=multipole_method,qm_resp=resp,int_method="dreem")
 # set additional parameters for the exchange repulsion + damping of electrostatics
 qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info=None)
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
@@ -117,7 +121,7 @@ qmmm_system.qm_system.dm_guess = dm
 # position of H-O-H H atom in nm
 R_HOH = np.array([0.0,0,0])
 # set up a grid of separations in nanometres units
-R_vals = np.linspace(0.15,0.5,num=40) 
+R_vals = np.linspace(0.175,0.5,num=40) 
 energies = np.zeros((R_vals.shape[0],1+resp.nstates))
 forces_qm = np.zeros((3,R_vals.shape[0],qm_positions.shape[0],3))
 forces_mm = np.zeros((3,R_vals.shape[0],mm_positions_ref.shape[0],3))
@@ -125,6 +129,7 @@ x = 0
 n_x = np.array([0.,0.,0.])
 n_x[x] = 1.0
 int_energies = [] 
+int_energies_resp = [] 
 mu = []
 for n,R in enumerate(R_vals):
     # set dm guess
@@ -135,18 +140,21 @@ for n,R in enumerate(R_vals):
     mm_unit = "nanometer"
     qmmm_system.setPositions(mm_positions=mm_positions,mm_unit=mm_unit)
     # get the energy
-    E_qmmm = qmmm_system.getEnergy()
-    #E_qmmm,_,_ = qmmm_system.getEnergyForces()
+    #E_qmmm = qmmm_system.getEnergy()
+    E_qmmm,_,_,_,_ = qmmm_system.getEnergyForces()
     # get density matrix
     #dm = qmmm_system.qm_system.mf_qmmm.make_rdm1()
     #qmmm_system.qm_system.dm_guess = dm
     # save enegy
     energies[n] = E_qmmm + 0
-    #int_energies.append( qmmm_system.qm_system.getInteractionEnergyDecomposition() )
-    #mu.append(qmmm_system.qm_system.mf_qmmm.dip_moment())
+    int_energies.append( qmmm_system.qm_system.getInteractionEnergyDecomposition() )
+    int_energies[n]["cp"]  = qmmm_system.mm_system.getCPRepulsion(get_force=False)
+    int_energies_resp.append( qmmm_system.qm_system.getInteractionEnergyDecomposition(resp_state=1) )
+    int_energies_resp[n]["cp"]  = qmmm_system.mm_system.getCPRepulsion(get_force=False)
+    mu.append(qmmm_system.qm_system.mf_qmmm.dip_moment())
     
 
-#mus = np.linalg.norm(np.array(mu),axis=1)
+mus = np.linalg.norm(np.array(mu),axis=1)
 
 print("Interaction energies [Hartree]:")
 print(energies-E_qmmm_0)
@@ -172,7 +180,7 @@ plt.ylabel("Energy [mH]")
 plt.legend()
 plt.show()
 
-exit()
+
 
 # plot energies 
 plt.rc('font', family='Helvetica') 
@@ -199,10 +207,10 @@ for n,decomp_n in enumerate(int_energies):
 
 #print(decomp_atm)            
 decomp["self"] -= E_qm
-keys = ["static","pol_mf","pol_fluct","rep","self"]
+keys = ["static","pol_mf","pol_fluct","rep","self","cp"]
 tot_int = np.zeros(R_vals.shape)
 for key in keys:
-    plt.plot(R_vals*1.0e1,decomp[key]*1e3,'--',label=key)
+    plt.plot(R_vals*1.0e1,decomp[key]*1e3,label=key)
     tot_int += 1.0*decomp[key]
     atm_int += decomp_atm[key]
     if not key=="static":
@@ -210,17 +218,19 @@ for key in keys:
 #print(tot_int)
 
 plt.rc('font', family='Helvetica') 
-plt.plot(R_vals*1.0e1,(energies-E_qmmm_0)*1e3,label="Interaction energy ")
+plt.plot(R_vals*1.0e1,(energies[:,0]-E_qmmm_0)*1e3,'k-',label="Interaction energy ")
+plt.plot(R_vals*1.0e1,(tot_int)*1e3,label="Total interaction energy terms")
 #plt.plot(R_vals*1.0e1,tot_int*1e3,'-.',label="Decomp sum")
 plt.xlabel("Separation [Angstrom]")
 plt.ylabel("Energy [mH]")
 plt.legend()
 plt.show()
 
+
 plt.rc('font', family='Helvetica') 
 for J in range(0,mol.natm):
-    plt.plot(R_vals*1.0e1,atm_int[:,J]*1e3,'--',label="Atom "+mol.elements[J]+" interaction energy")
-plt.plot(R_vals*1.0e1,(energies-E_qmmm_0)*1e3,label="Total interaction energy")
+    plt.plot(R_vals*1.0e1,atm_int[:,J]*1e3,label="Atom "+mol.elements[J]+" interaction energy")
+plt.plot(R_vals*1.0e1,(energies[:,0]-E_qmmm_0)*1e3,label="Total interaction energy")
 #plt.plot(R_vals*1.0e1,np.sum(atm_int,axis=1)*1e3,label="Total interaction energy")
 plt.xlabel("Separation [Angstrom]")
 plt.ylabel("Energy [mH]")
@@ -229,9 +239,47 @@ plt.show()
 
 plt.rc('font', family='Helvetica') 
 for J in range(0,mol.natm):
-    plt.plot(R_vals*1.0e1,atm_int_nostatic[:,J]*1e3,'--',label="Atom "+mol.elements[J]+" interaction energy")
-plt.plot(R_vals*1.0e1,(energies-E_qmmm_0)*1e3,label="Total interaction energy")
+    plt.plot(R_vals*1.0e1,atm_int_nostatic[:,J]*1e3,label="Atom "+mol.elements[J]+" interaction energy")
+plt.plot(R_vals*1.0e1,(energies[:,0]-E_qmmm_0)*1e3,label="Total interaction energy")
 #plt.plot(R_vals*1.0e1,np.sum(atm_int,axis=1)*1e3,label="Total interaction energy")
+plt.xlabel("Separation [Angstrom]")
+plt.ylabel("Energy [mH]")
+plt.legend()
+plt.show()
+
+
+decomp = {}
+decomp_atm = {}
+for key in int_energies_resp[0].keys():
+    decomp[key] = np.zeros(R_vals.shape)
+for key in int_energies_resp[0].keys():
+    decomp_atm[key] = np.zeros((R_vals.shape[0],qm_positions.shape[0]))
+atm_int = np.zeros((R_vals.shape[0],qm_positions.shape[0]))
+atm_int_nostatic = np.zeros((R_vals.shape[0],qm_positions.shape[0]))
+for n,decomp_n in enumerate(int_energies_resp):
+    for key in decomp_n.keys():
+        decomp[key][n] = np.sum(decomp_n[key])
+        if not key=="self":
+            decomp_atm[key][n] = decomp_n[key]
+            
+#print(E_qm, (E_qm + E_exc[0]))
+decomp["self"] -= (E_qm + E_exc[0])
+
+keys = ["static","pol_mf","pol_fluct","rep","self","cp"]
+tot_int = np.zeros(R_vals.shape)
+for key in keys:
+    plt.plot(R_vals*1.0e1,decomp[key]*1e3,label=key)
+    tot_int += 1.0*decomp[key]
+    atm_int += decomp_atm[key]
+    if not key=="static":
+        atm_int_nostatic += decomp_atm[key]
+#print(tot_int)
+#print(decomp)
+
+plt.rc('font', family='Helvetica') 
+plt.plot(R_vals*1.0e1,(energies[:,1]-E_refs[1])*1e3,'k-',label="Interaction energy ")
+plt.plot(R_vals*1.0e1,(tot_int)*1e3,label="Total interaction energy terms")
+#plt.plot(R_vals*1.0e1,tot_int*1e3,'-.',label="Decomp sum")
 plt.xlabel("Separation [Angstrom]")
 plt.ylabel("Energy [mH]")
 plt.legend()

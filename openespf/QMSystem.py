@@ -716,6 +716,8 @@ class QMSystem:
             self.dmxpy = envs["dmxpy"] # X+Y in AO basis
         if not hasattr(self,"dmxmy"):
             self.dmxmy = envs["dmxmy"] # X-Y in AO basis
+        if not hasattr(self,"dmzoo"):
+            self.dmzoo = envs["dmzoo"]
         
         
         
@@ -725,21 +727,29 @@ class QMSystem:
         return F
     
     def resetRespForce(self):
-        delattr(self, "ddm1")
-        delattr(self, "dm1")
-        delattr(self,"dmxpy")
-        delattr(self,"dmxmy")
+        vars = ["ddm1","dm1","dmxpy","dmxpy","dmxmy","dmzoo"]
+        for var in vars:
+            if hasattr(self,var):
+                delattr(self, var)
+        #delattr(self, "ddm1")
+        #delattr(self, "dm1")
+        #delattr(self,"dmxpy")
+        #delattr(self,"dmxmy")
         return
     
-    def getMeanMultipolesResp(self,dm=None,dm_Q=None,comb_coulexch=True):
+    def getMeanMultipolesResp(self,dm=None,dm_Q=None,comb_coulexch=True,relaxed=True):
         '''
         Get response contributions to the mean multipoles.
         Needs to be added to ground state contribution.
         Currently assumes spin-restricted response properties
         '''
-        ddm1 = 0.5*(self.ddm1+self.ddm1.T)
+        if relaxed:
+            ddm1 = 0.5*(self.ddm1+self.ddm1.T)
+        else:
+            ddm1 = 0.5*(self.dmzoo+self.dmzoo.T)
         dmxpy = self.dmxpy
         dmxmy = self.dmxmy
+        
         
         #dmxpy = 0.5*(dmxpy+dmxpy.T)
         #dmxmy = 0.5*(dmxmy+dmxmy.T)
@@ -978,6 +988,7 @@ class QMSystem:
         '''
         Returns the force on MM atoms
         '''
+        
         F = np.zeros(self.F_0_mm.shape)
         dm0 = np.array(self.mf_qmmm.make_rdm1())
         if len(dm0.shape)>2:
@@ -1049,6 +1060,7 @@ class QMSystem:
         '''
         Get QM forces for resp state
         '''
+        self.resetRespForce()
         self.createModifiedGradResp()
         F = -self.grad_resp_qmmm.kernel(state=state)
         
@@ -1342,13 +1354,19 @@ class QMSystem:
         #F = - np.einsum('xnm,nm->x',grad_h_exchrep_B,dm)
         return  -np.einsum('xnm,nm->x',grad_h_exchrep_B,dm,optimize=self.dexchrep_einpath)
     
-    def getInteractionEnergyDecomposition(self,print_decomp=False):
+    def getInteractionEnergyDecomposition(self,print_decomp=False,resp_state=None):
         
         
         int_energies={}
         # get mean multipoles
         if self.int_method == "dreem":
             av_Q, av_QQ_1e, av_QQ_2e_c, av_QQ_2e_x = self.getMeanMultipoles(comb_coulexch=False)
+            if resp_state is not None:
+                av_Q1, av_QQ_1e1, av_QQ_2e_c1, av_QQ_2e_x1 = self.getMeanMultipolesResp(comb_coulexch=False,relaxed=True)
+                av_Q += av_Q1
+                av_QQ_1e += av_QQ_1e1
+                av_QQ_2e_c += 2.0*av_QQ_2e_c1
+                av_QQ_2e_x += 2.0*av_QQ_2e_x1
             av_Q_av_Q = np.outer(av_Q,av_Q)
             dQ_dQ_1e =  av_QQ_1e - av_Q_av_Q
             Z = np.zeros(av_Q.shape)
@@ -1410,6 +1428,8 @@ class QMSystem:
         if self.rep_method =="exch":
             h_exchrep = self.getExchRepHamiltonian()
             dm = np.array(self.mf_qmmm.make_rdm1())
+            if resp_state is not None:
+                dm += 0.5*(self.ddm1+self.ddm1.T)
             if len(dm.shape)>2:
                 dm = dm[0,:,:] + dm[1,:,:]
             E_rep = np.einsum('nm,nm',dm,h_exchrep)
@@ -1426,6 +1446,34 @@ class QMSystem:
             int_energies["rep"]=E_rep_atm
             
         int_energies["self"] = self.mf.energy_tot(dm=self.mf_qmmm.make_rdm1())
+        
+        
+        if resp_state is not None:
+            #X_mod, Y_mod = self.resp_qmmm.xy[resp_state-1]
+            #x_vec = X_mod.flatten()
+            #
+            #A_unmod, B_unmod = self.resp.get_ab()
+            ##print(X_mod.shape,A_unmod.shape)
+            ##omega_unmod = x_vec.T @ A_unmod @ x_vec
+            #omega_unmod = 2.0*np.einsum('ia,iajb,jb->',X_mod,A_unmod,X_mod)
+            #if type(Y_mod) is not int:
+            #    #y_vec = Y_mod.flatten()
+            #    term2 = 2.0*np.einsum('ia,iajb,jb->',X_mod,B_unmod,Y_mod)
+            #    term3 = 2.0*np.einsum('ia,iajb,jb->',Y_mod,B_unmod,X_mod)
+            #    term4 = 2.0*np.einsum('ia,iajb,jb->',Y_mod,A_unmod,Y_mod)
+            #    #term2 = x_vec.T @ B_unmod @ y_vec
+            #    #term3 = y_vec.T @ B_unmod @ x_vec
+            #    #term4 = y_vec.T @ A_unmod @ y_vec
+            #    omega_unmod +=  term2 + term3 + term4
+            ##int_energies["self"] += omega_unmod
+            #print(self.resp_qmmm.e[resp_state-1],  self.mf_qmmm.energy_tot(dm=self.mf_qmmm.make_rdm1()))
+            int_energies["self"] = self.u_0+self.resp_qmmm.e[resp_state-1] + self.mf_qmmm.energy_tot(dm=self.mf_qmmm.make_rdm1())
+            #print(int_energies["self"])
+            for n,key in enumerate(["rep","static","pol"]):
+                int_energies["self"] -= np.sum(int_energies[key])
+                #print(int_energies["self"])
+            
+        
         if print_decomp : print("QM self energy [AU]:",int_energies["self"])
             
             

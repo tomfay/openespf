@@ -283,7 +283,7 @@ class QMMMSystem:
                     f_resp_qm[n,:,:] += F_qm_c-F_qm_c_0 #+ force_terms_qm["QM+int"] -  F_qm_c_0
                     f_resp_mm[n,:,:] += F_mm_c-F_mm_c_0 #- force_terms_mm["QM+int"] # + force_terms_mm["QM+int"] #+ F_mm_c_0
                     
-                self.qm_system.resetRespForce()
+                #self.qm_system.resetRespForce()
         
         
         
