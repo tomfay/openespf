@@ -36,6 +36,7 @@ mf.xc = "hf"
 mf.kernel()
 resp = tddft.TDA(mf)
 
+
 nstates = 5
 resp.nstates = nstates
 resp.kernel()
@@ -131,6 +132,8 @@ n_x[x] = 1.0
 int_energies = [] 
 int_energies_resp = [] 
 mu = []
+tdms = []
+tdms_mm = []
 for n,R in enumerate(R_vals):
     # set dm guess
     qmmm_system.qm_system.dm_guess = dm
@@ -152,9 +155,13 @@ for n,R in enumerate(R_vals):
     int_energies_resp.append( qmmm_system.qm_system.getInteractionEnergyDecomposition(resp_state=1) )
     int_energies_resp[n]["cp"]  = qmmm_system.mm_system.getCPRepulsion(get_force=False)
     mu.append(qmmm_system.qm_system.mf_qmmm.dip_moment())
+    tdms.append(qmmm_system.qm_system.resp_qmmm.transition_dipole())
+    tdms_mm.append(qmmm_system.getTDMMM())
     
 
 mus = np.linalg.norm(np.array(mu),axis=1)
+
+
 
 print("Interaction energies [Hartree]:")
 print(energies-E_qmmm_0)
@@ -181,12 +188,26 @@ plt.legend()
 plt.show()
 
 
-
-# plot energies 
 plt.rc('font', family='Helvetica') 
 plt.plot(R_vals*1.0e1,mus,label="Dipole moment")
 plt.xlabel("Separation [Angstrom]")
 plt.ylabel("Dipole moment [D]")
+plt.legend()
+plt.show()
+
+#plot TDMS
+tdms = np.array(tdms)
+tdms_mm = np.array(tdms_mm)
+print(tdms.shape, tdms_mm.shape)
+plt.rc('font', family='Helvetica') 
+plt.plot(R_vals*1.0e1,np.linalg.norm(tdms[:,0,:],axis=-1),'b--',label="Molecular TDM S_1")
+plt.plot(R_vals*1.0e1,np.linalg.norm(tdms_mm[:,0,:],axis=-1),'b:',label="MM correction to TDM S_1")
+plt.plot(R_vals*1.0e1,np.linalg.norm(tdms[:,0,:]+tdms_mm[:,0,:],axis=-1),'b-',label="Total TDM S_1")
+plt.plot(R_vals*1.0e1,np.linalg.norm(tdms[:,1,:],axis=-1),'r--',label="Molecular TDM S_2")
+plt.plot(R_vals*1.0e1,np.linalg.norm(tdms_mm[:,1,:],axis=-1),'r:',label="MM correction to TDM S_2")
+plt.plot(R_vals*1.0e1,np.linalg.norm(tdms[:,1,:]+tdms_mm[:,1,:],axis=-1),'r-',label="Total TDM S_2")
+plt.xlabel("Separation [Angstrom]")
+plt.ylabel("Dipole moment [a.u.]")
 plt.legend()
 plt.show()
 

@@ -23,10 +23,10 @@ import matplotlib.pyplot as plt
 
 
 # set up the Pyscf QM system u
-mol = gto.M(atom="1-inputs/acrolein.xyz",unit="Angstrom",basis="pc-1",charge=0)
+mol = gto.M(atom="1-inputs/acrolein.xyz",unit="Angstrom",basis="pc-0",charge=0)
 # The DFT method is chosen to be a long-range-corrected functional with density fitting
 mf = dft.RKS(mol)
-mf.xc = "PBE0"
+mf.xc = "HF"
 #mf = mf.density_fit(auxbasis="weigendjkfit")
 mf.kernel()
 resp = tdscf.TDA(mf)
@@ -87,6 +87,8 @@ qmmm_system.qm_system.dm_guess = dm
 # set up a grid of separations in nanometres units
 R_vals = np.linspace(5.,1.5,num=20) * 0.1
 energies = []
+tdms = []
+tdms_mm = []
 for n,R in enumerate(R_vals):
     # set the MM atom positions
     mm_positions = np.array([[R,0,0]])+mm_positions_ref
@@ -99,6 +101,8 @@ for n,R in enumerate(R_vals):
     qmmm_system.qm_system.dm_guess = dm
     # save enegy
     energies.append(E_qmmm)
+    tdms.append(qmmm_system.qm_system.resp_qmmm.transition_dipole())
+    tdms_mm.append(qmmm_system.getTDMMM())
 
 
 energies = np.array(energies)
@@ -127,4 +131,19 @@ plt.xlabel("Separation [Angstrom]")
 plt.ylabel("State interaction energies [mH]")
 plt.legend()
 
+plt.show()
+
+tdms = np.array(tdms)
+tdms_mm = np.array(tdms_mm)
+print(tdms.shape, tdms_mm.shape)
+plt.rc('font', family='Helvetica') 
+plt.plot(R_vals*1.0e1,np.linalg.norm(tdms[:,0,:],axis=-1),'b--',label="Molecular TDM S_1")
+plt.plot(R_vals*1.0e1,np.linalg.norm(tdms_mm[:,0,:],axis=-1),'b:',label="MM correction to TDM S_1")
+plt.plot(R_vals*1.0e1,np.linalg.norm(tdms[:,0,:]+tdms_mm[:,0,:],axis=-1),'b-',label="Total TDM S_1")
+plt.plot(R_vals*1.0e1,np.linalg.norm(tdms[:,1,:],axis=-1),'r--',label="Molecular TDM S_2")
+plt.plot(R_vals*1.0e1,np.linalg.norm(tdms_mm[:,1,:],axis=-1),'r:',label="MM correction to TDM S_2")
+plt.plot(R_vals*1.0e1,np.linalg.norm(tdms[:,1,:]+tdms_mm[:,1,:],axis=-1),'r-',label="Total TDM S_2")
+plt.xlabel("Separation [Angstrom]")
+plt.ylabel("Transition Dipole moment [a.u.]")
+plt.legend()
 plt.show()

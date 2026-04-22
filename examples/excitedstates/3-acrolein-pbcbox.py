@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 
 
 # Get info MM He system and set up the OpenMM simulation object
-pdb = PDBFile("1-inputs/acetone-waterbox-eq.pdb")
+pdb = PDBFile("3-inputs/acrolein-waterbox.pdb")
 modeller = Modeller(pdb.getTopology() , pdb.getPositions())
 modeller.delete([r for r in modeller.topology.residues() if r.name == "UNL"])
 topology = modeller.getTopology()
@@ -29,7 +29,7 @@ positions = modeller.getPositions()
 forcefield = ForceField("3-inputs/h2o.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=PME,nonbondedCutoff=1.0*nanometer)
 #system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
-platform = Platform.getPlatformByName("Reference")
+platform = Platform.getPlatformByName("OpenCL")
 integrator = VerletIntegrator(1e-16*picoseconds)
 simulation = Simulation(topology, system, integrator,platform)
 simulation.context.setPositions(positions)
@@ -40,12 +40,12 @@ modeller.delete([r for r in modeller.topology.residues() if r.name == "HOH"])
 residue = [r for r in modeller.topology.residues()][0]
 qm_positions = np.array(modeller.getPositions()._value) * 10. # in Angstrom
 atom =  [[atom.element.symbol , qm_positions[n,:]] for n,atom in enumerate(residue.atoms())] 
-mol = gto.M(atom=atom,unit="Angstrom",basis="def2-SVP",charge=0)
+mol = gto.M(atom=atom,unit="Angstrom",basis="pc-1",charge=0)
 # The DFT method is chosen to be ωB97X-D3/def2-SVP
 mf = dft.RKS(mol)
-mf.xc = "PBE0"
+mf.xc = "HYB_GGA_XC_WB97X_D3"
 resp = tdscf.TDA(mf)
-resp.nstates = 2
+resp.nstates = 3
 #mf = mf.density_fit()
 
 

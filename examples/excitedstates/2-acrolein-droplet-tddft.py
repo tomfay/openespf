@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 
 
 # Get info MM He system and set up the OpenMM simulation object
-pdb = PDBFile("2-inputs/acrolein-droplet.pdb")
+pdb = PDBFile("2-inputs/droplet-6A.pdb")
 modeller = Modeller(pdb.getTopology() , pdb.getPositions())
 modeller.delete([r for r in modeller.topology.residues() if r.name == "UNL"])
 positions = modeller.getPositions()
@@ -30,7 +30,7 @@ topology = modeller.getTopology()
 positions = modeller.getPositions()
 forcefield = ForceField("2-inputs/h2o.xml")
 system = forcefield.createSystem(topology,nonbondedMethod=NoCutoff)
-platform = Platform.getPlatformByName("Reference")
+platform = Platform.getPlatformByName("OpenCL")
 integrator = VerletIntegrator(1e-16*picoseconds)
 simulation = Simulation(topology, system, integrator,platform)
 simulation.context.setPositions(positions)
@@ -41,11 +41,11 @@ modeller.delete([r for r in modeller.topology.residues() if r.name == "HOH"])
 residue = [r for r in modeller.topology.residues()][0]
 qm_positions = np.array(modeller.getPositions()._value) * 10. # in Angstrom
 atom =  [[atom.element.symbol , qm_positions[n,:]] for n,atom in enumerate(residue.atoms())] 
-mol = gto.M(atom=atom,unit="Angstrom",basis="def2-SVP",charge=0)
+mol = gto.M(atom=atom,unit="Angstrom",basis="pc-1",charge=0)
 # The DFT method is chosen to be ωB97X-D3/def2-SVP
 mf = dft.RKS(mol)
-mf.xc = "PBE0"
-resp = tdscf.TDDFT(mf)
+mf.xc = "HYB_GGA_XC_WB97X_D3"
+resp = tdscf.TDA(mf)
 resp.nstates = 2
 
 #mf = mf.density_fit()
@@ -69,6 +69,10 @@ qmmm_system = QMMMSystem(simulation,mf,multipole_order=multipole_order,multipole
 # set additional parameters for the exchange repulsion + damping of electrostatics
 qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info=None)
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
+#qmmm_system.mm_system.test_dipole = 0.001
+#qmmm_system.mm_system.test_charge = 1.0e0
+qmmm_system.qm_system.multipole.espf_reg_type = "mulliken"
+qmmm_system.qm_system.multipole.espf_reg_param = 1e-2
 
 # get positions for the QM and MM atoms
 mm_positions = simulation.context.getState(getPositions=True).getPositions(asNumpy=True)._value
@@ -79,6 +83,9 @@ qmmm_system.setPositions(mm_positions=mm_positions,mm_unit=mm_unit,qm_positions=
 
 # get the reference QM and MM energies
 mf.kernel()
+dipole_vac = mf.dip_moment()
+print("Dipole magnitude (Vac) = " , np.linalg.norm(dipole_vac)," Debye")
+
 resp.__init__(mf)
 resp.kernel()
 print("Vacuum analysis")
@@ -101,6 +108,24 @@ print("E_n(QM/MM) = ",E_qmmm)
 print("E_n(QM/MM) - E_0(QM) - E(MM) = ",E_qmmm - E_qmmm_0)
 print("E_n(QM/MM) - E_n(QM) - E(MM) = ",E_qmmm - E_qmmm_0 - np.array([0]+list(E_exc)))
 
+# The dipole moment of the QM system can be accessed as follows, as expected it is polarised relative to the vacuum
+dipole_aq = qmmm_system.qm_system.mf_qmmm.dip_moment()
+print("Dipole magnitude (Aq) = " , np.linalg.norm(dipole_aq)," Debye")
+print("Magnitude of change in dipole moment = " , np.linalg.norm(dipole_aq-dipole_vac)," Debye")
+
 # analyse the transition moments
 print("Droplet analysis")
 qmmm_system.qm_system.resp_qmmm.analyze()
+
+print("Bare transition dipoles:")
+tdm = -qmmm_system.qm_system.resp_qmmm.transition_dipole()
+print(tdm)
+print("|Bare TDM|^2:")
+print(np.linalg.norm(tdm,axis=1)**2)
+print("MM corrections to TDM")
+tdm_mm = qmmm_system.getTDMMM()
+print(tdm_mm)
+print("Total TDM:")
+print(tdm+tdm_mm)
+print("|Total TDM|^2:")
+print(np.linalg.norm(tdm+tdm_mm,axis=1)**2)

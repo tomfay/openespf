@@ -523,6 +523,9 @@ class QMMMSystem:
             return E_rep
         
     def setupCPRepulsion(self,Z_MM,Z_QM=None):
+        '''
+        Sets up terms for core-penetration repulsion.
+        '''
         if Z_QM is None:
             self.Z_QM = self.qm_system.mol.atom_charges()
         else:
@@ -535,4 +538,49 @@ class QMMMSystem:
         self.use_cp_rep = True
         
         return
+    
+    def getTDMMM(self):
+        '''
+        Gets TDM contribution from MM environment
+        '''
+        tdm_mm = np.zeros((self.qm_system.resp_qmmm.nstates,3))
+        N_QM = self.qm_positions.shape[0]
+        
+        mu_QM_sum = self.mm_system.mu_QM_sum * Data.NM_TO_BOHR
+        #print(mu_QM_sum)
+        
+        for n,xy in enumerate(self.qm_system.resp_qmmm.xy):
+            # get transition amplitude for S0->S1 in MO basis
+            x,y = xy
+            if type(y) is int:
+                y = 0.0
+            T = x + y
+            #print(np.sum(x*x)+np.sum(y*y),np.sum(x*x)-np.sum(y*y))
+            c_mo = self.qm_system.mf_qmmm.mo_coeff
+            nocc = self.qm_system.mol.nelectron // 2
+
+            # Slice MO coefficients into occupied and virtual blocks
+            c_occ = c_mo[:, :nocc]
+            c_vir = c_mo[:, nocc:]
+
+            # 3. Construct the Transition Density Matrix
+            # Multiply by sqrt(2) for closed-shell singlets
+            dm_tr_mo = (2) * T
+
+            # Transform to the AO basis: D_ao = C_occ @ D_mo @ C_vir^T
+            dm_tr = c_occ @ dm_tr_mo @ c_vir.T
+            Q_tr = np.einsum('nm,anm->a',dm_tr,self.qm_system.Q)
+            tdm_q = np.einsum('a,ax->x',Q_tr[0:N_QM],self.qm_system.mol.atom_coords())
+            #print("Bare TDM from ESPF (charges):", tdm_q)
+            if self.multipole_order>0:
+                mu_tr = Q_tr[N_QM:].reshape((3,N_QM)).T
+                tdm_mu = np.sum(mu_tr,axis=0)
+                #print("Bare TDM from ESPF (charges+dipoles):", tdm_q+tdm_mu)
+                
+            
+            tdm_mm[n,:] = np.einsum('a,ax->x',Q_tr,mu_QM_sum)
+            #if n == 0:
+            #    print(Q_tr)
+            
+        return tdm_mm
                               

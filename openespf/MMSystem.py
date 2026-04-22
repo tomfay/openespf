@@ -38,6 +38,7 @@ class MMSystem:
         self.test_dipole = 1.0e0*Data.BOHR_TO_NM
         self.test_charge = 1.0e1
         self.print_info = False
+        self.save_mu = False
         #self.induced_dipole_error = 1.0e-8
         #self.max_iter_induced = 100
         self.resp_mode = "linear"
@@ -1732,7 +1733,9 @@ class MMSystem:
             U_self = self.getSelfInteractionEnergy(multipole_order=0)
             U_2 += U_self
             
-        
+        if self.save_mu:
+            self.mu_QM = mu_QM/c
+        self.mu_QM_sum = np.sum(mu_QM,axis=1)/c
                 
         if not get_forces:
             return U_MM,U_1,U_2
@@ -1883,6 +1886,15 @@ class MMSystem:
             #F_1_qm[N_QM:,:,:] = (F_plus_qm[N_QM:,:,:] - F_0_qm[None,:,:]) * (1.0/d_0)
         #U_1[0:N_QM] = (U_plus[0:N_QM] - U_MM - (0.5*c*c)*np.diag(U_2)[0:N_QM])/c
         #U_1[N_QM:] = (U_plus[N_QM:] - U_MM - (0.5*c*c)*np.diag(U_2)[N_QM:])/d_0
+        
+        # dipoles induced in the MM system by a unit multipole 
+        if self.save_mu:
+            self.mu_QM = mu_QM
+            #self.mu_QM[0:N_QM,:,:] /= c
+            #self.mu_QM[N_QM:,:,:] /= d_0
+        self.mu_QM_sum = np.sum(mu_QM,axis=1)
+        #self.mu_QM_sum[0:N_QM,:] /= c
+        #self.mu_QM_sum[N_QM:,:] /= d_0
         
         if self.multipole_force.usesPeriodicBoundaryConditions():
             U_self = self.getSelfInteractionEnergy(multipole_order=1)
