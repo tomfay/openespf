@@ -2,10 +2,12 @@ import numpy as np
 from scipy.linalg import sqrtm, inv, solve
 from scipy.optimize import fsolve
 from copy import deepcopy, copy
-from pyscf import gto, scf, ao2mo, dft, lib
-from pyscf.data import radii
+from pyscf import gto, scf, ao2mo, dft, lib, df
+from pyscf.data import radii, elements
 from concurrent.futures import ThreadPoolExecutor
 from timeit import default_timer as timer
+import os
+MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 try:
     import pytblis
     # Assign it to a custom, short name like 'teinsum' (tensor einsum)
@@ -13,6 +15,1868 @@ try:
 except ImportError:
     # Fallback to standard numpy
     np.einsum = np.einsum
+
+
+
+def setup_default_min_basis(add_pol=False):
+    min_basis_ref = MODULE_DIR + "/data/scalmini.nw"
+    min_basis_mod = {}
+    
+    # 1. Eagerly construct the dictionary for elements up to Radon (Z=86)
+    for Z in range(1, 87):
+        symb = elements.ELEMENTS[Z]
+        try:
+            # Try to load the primary basis
+            min_basis_mod[symb] = gto.basis.load(min_basis_ref, symb)
+        except (RuntimeError, KeyError):
+            try:
+                # Fallback to sto-3g if the element is missing
+                min_basis_mod[symb] = gto.basis.load('sto-3g', symb)
+            except (RuntimeError, KeyError):
+                pass # Skip if the element is missing in both bases
+
+    # 2. Append polarization functions if requested
+    if add_pol:
+        if 'H' in min_basis_mod:
+            min_basis_mod['H'] = min_basis_mod['H'] + [[1, [0.727, 1]]]
+        if 'He' in min_basis_mod:
+            min_basis_mod['He'] = min_basis_mod['He'] + [[1, [1.275, 1.0]]]
+
+    return min_basis_mod
+    
+def solve_kkt_tensor_reshaped(A, b, C, d):
+    """
+    Solves the KKT constrained minimization problem over the last dimension 
+    of a tensor and moves the parameter dimension to the front.
+    """
+    N = A.shape[0]
+    M = C.shape[1]
+    
+    top_row = np.hstack((A, C))
+    bottom_row = np.hstack((C.T, np.zeros((M, M))))
+    kkt_mat = np.vstack((top_row, bottom_row))
+    
+    rhs = np.concatenate((b, d), axis=-1)
+    
+    kkt_inv = inv(kkt_mat)
+    solution = np.einsum('ij,...j->...i', kkt_inv, rhs)
+    
+    x = solution[..., :N]
+    y = np.moveaxis(x, source=-1, destination=0)
+    constraint_vals = x @ C 
+    # Calculate the maximum absolute error across all dimensions
+    max_error = np.max(np.abs(constraint_vals - d))
+    #print(f"Max constraint violation |C^T x - d|: {max_error:.4e}")
+
+    return y    
+    
+quad_map = [
+    (0, 0, 0, 1.0), # xx
+    (0, 1, 1, 2.0), # xy (weight 2 for off-diagonal rotational invariance)
+    (0, 2, 2, 2.0), # xz
+    (1, 1, 4, 1.0), # yy
+    (1, 2, 5, 2.0), # yz
+    (2, 2, 8, 1.0)  # zz
+]    
+    
+def getDMFitChargeOperatorSphericalOld(mol, min_basis='minao', reg=1e-12, reg_r2=0.0, reg_S=0.0, 
+                                    w_df=1.0, w_mu=0.0, w_ovlp=0.0, w_quad=0.0, aux_basis='weigend-jfit', 
+                                    return_fit=False, constrain_dipole=False, constrain_quad=False):
+    """
+    Fits the orbital pair density to a minimal basis atom-centered spherically
+    symmetric density, and extracts the charge operator Q_{A, nm}.
+    """
+
+    
+    # =========================================================================
+    # Build Minimal Basis & Pre-Compute Global Integrals
+    # =========================================================================
+    atom_mols = []
+    min_ao_ranges = []
+    ao_offset = 0
+    
+    for i in range(mol.natm):
+        atm_mol = gto.Mole()
+        atm_mol.atom = [[mol.atom_symbol(i), mol.atom_coord(i)]] 
+        atm_mol.unit = 'Bohr'
+        atm_mol.basis = min_basis
+        atm_mol.spin = 0
+        atm_mol.charge = mol.atom_charge(i)
+        atm_mol.build()
+        atom_mols.append(atm_mol)
+        
+        min_ao_ranges.append((ao_offset, ao_offset + atm_mol.nao))
+        ao_offset += atm_mol.nao
+
+    # Out-of-place addition to prevent shallow copy mutation bugs
+    min_mol = atom_mols[0]
+    for atm in atom_mols[1:]:
+        min_mol = min_mol + atm
+
+    Np = mol.nao
+    nshl_parent, nshl_min = mol.nbas, min_mol.nbas
+    
+    mol_comb = mol + min_mol
+    shls_slice = (0, nshl_parent, 0, nshl_parent, nshl_parent, nshl_parent + nshl_min, nshl_parent, nshl_parent + nshl_min)
+    
+    eri_parent_min_full = mol_comb.intor('int2e', shls_slice=shls_slice)
+    eri_min_min_full = min_mol.intor('int2e')
+
+    S_parent = mol.intor('int1e_ovlp')
+    mu_parent = -mol.intor('int1e_r') 
+    rr_parent = mol.intor('int1e_rr')
+
+    # =========================================================================
+    # Construct Spherically Averaged Basis Pairs & Local Vectors
+    # =========================================================================
+    spherical_pairs = []
+    S_atomic, mu_atomic_shifted, r_atomic, rr_atomic, r2_atomic = [], [], [], [], []
+
+    for A, mol_A in enumerate(atom_mols):
+        R_A = mol.atom_coord(A) 
+        
+        mol_A.set_common_orig(R_A)
+        mu_atomic_shifted.append(-mol_A.intor('int1e_r'))
+        r_atomic.append(mol_A.intor('int1e_r'))
+        rr_atomic.append(mol_A.intor('int1e_rr'))
+        r2_atomic.append(mol_A.intor('int1e_r2'))
+        mol_A.set_common_orig((0.0, 0.0, 0.0))
+        S_atomic.append(mol_A.intor('int1e_ovlp'))
+
+        ao_loc = mol_A.ao_loc_nr()
+        n_shells = mol_A.nbas
+        
+        for i in range(n_shells):
+            l_i = mol_A.bas_angular(i)
+            for j in range(i + 1):
+                if l_i == mol_A.bas_angular(j):
+                    a_idx, b_idx = np.arange(ao_loc[i], ao_loc[i+1]), np.arange(ao_loc[j], ao_loc[j+1])
+                    spherical_pairs.append({
+                        'atom': A,
+                        'ab_pairs': np.column_stack((a_idx, b_idx)),
+                        'min_ao_a': min_ao_ranges[A][0] + a_idx,
+                        'min_ao_b': min_ao_ranges[A][0] + b_idx
+                    })
+
+    M_pairs = len(spherical_pairs)
+
+    # Pre-compute Global Contributions
+    V_pairs = np.zeros((M_pairs, 3))
+    V_quad_pairs = np.zeros((M_pairs, 6))
+    
+    for I, pI in enumerate(spherical_pairs):
+        A_idx = pI['atom']
+        R_A = mol.atom_coord(A_idx)
+        a, b = pI['ab_pairs'][:, 0], pI['ab_pairs'][:, 1]
+        
+        sum_mu = np.sum(mu_atomic_shifted[A_idx][:, a, b], axis=1)
+        sum_S = np.sum(S_atomic[A_idx][a, b])
+        V_pairs[I] = sum_mu - sum_S * R_A
+            
+        if w_quad > 0.0 or constrain_quad:
+            for q, (i, j, f, w) in enumerate(quad_map):
+                V_quad_pairs[I, q] = (np.sum(rr_atomic[A_idx][f, a, b]) + 
+                                      R_A[j] * np.sum(r_atomic[A_idx][i, a, b]) + 
+                                      R_A[i] * np.sum(r_atomic[A_idx][j, a, b]) + 
+                                      R_A[i] * R_A[j] * sum_S)
+
+    # =========================================================================
+    # Build Auxiliary Basis Metric (L2 Overlap)
+    # =========================================================================
+    if w_ovlp > 0.0 and aux_basis is not None:
+        auxmol = df.make_auxmol(mol, aux_basis)
+        N_aux, nshl_aux = auxmol.nao, auxmol.nbas
+        
+        S_aux_inv = np.linalg.pinv(auxmol.intor('int1e_ovlp'), rcond=1e-8)
+        mol_parent_aux = mol + auxmol
+        ovlp3c_parent = mol_parent_aux.intor('int3c1e', shls_slice=(0, nshl_parent, 0, nshl_parent, nshl_parent, nshl_parent + nshl_aux))
+        
+        ovlp3c_min_aux = (min_mol + auxmol).intor('int3c1e', shls_slice=(0, nshl_min, 0, nshl_min, nshl_min, nshl_min + nshl_aux))
+        ovlp3c_I = np.array([np.sum(ovlp3c_min_aux[pI['min_ao_a'], pI['min_ao_b'], :], axis=0) for pI in spherical_pairs])
+        ovlp3c_I_proj = ovlp3c_I @ S_aux_inv
+
+    # =========================================================================
+    # Build Vectorized KKT Matrices
+    # =========================================================================
+    n_constraints = 1 + (3 if constrain_dipole else 0) + (6 if constrain_quad else 0)
+    C_mat = np.zeros((M_pairs, n_constraints))
+    b_tensor_df = np.zeros((Np, Np, M_pairs))
+    A_mat_df = np.zeros((M_pairs, M_pairs))
+
+    for I, pI in enumerate(spherical_pairs):
+        a_I, b_I = pI['min_ao_a'], pI['min_ao_b']
+        C_mat[I, 0] = np.sum(S_atomic[pI['atom']][pI['ab_pairs'][:, 0], pI['ab_pairs'][:, 1]])
+        b_tensor_df[:, :, I] = np.sum(eri_parent_min_full[:, :, a_I, b_I], axis=-1)
+        
+        eri_slice = eri_min_min_full[a_I, b_I, :, :]
+        for J, pJ in enumerate(spherical_pairs):
+            A_mat_df[I, J] = np.sum(eri_slice[:, pJ['min_ao_a'], pJ['min_ao_b']])
+
+    # Apply Weights and Penalities
+    b_tensor = w_df * b_tensor_df.copy()
+    A_mat = w_df * A_mat_df.copy()
+
+    if reg_S > 0.0:
+        b_tensor += reg_S * np.einsum('i,jk->jki', C_mat[:, 0], S_parent)
+        A_mat += reg_S * np.outer(C_mat[:, 0], C_mat[:, 0])
+        
+    if w_mu > 0.0:
+        for x in range(3):
+            b_tensor += w_mu * np.einsum('i,jk->jki', V_pairs[:, x], mu_parent[x])
+        A_mat += w_mu * (V_pairs @ V_pairs.T)
+        
+    if w_quad > 0.0:
+        W_vec = np.array([w for (_, _, _, w) in quad_map])
+        for q, (i, j, f, w) in enumerate(quad_map):
+            b_tensor += w_quad * w * np.einsum('i,jk->jki', V_quad_pairs[:, q], rr_parent[f])
+        A_mat += w_quad * (V_quad_pairs * W_vec) @ V_quad_pairs.T
+        
+    if reg_r2 > 0.0:
+        R_vdw = radii.VDW[min_mol.atom_charges()]
+        for I, pI in enumerate(spherical_pairs):
+            A_idx = pI['atom']
+            sum_r2_I = np.sum(r2_atomic[A_idx][pI['ab_pairs'][:,0], pI['ab_pairs'][:,1]])
+            for J, pJ in enumerate(spherical_pairs):
+                if A_idx == pJ['atom']:
+                    sum_r2_J = np.sum(r2_atomic[A_idx][pJ['ab_pairs'][:,0], pJ['ab_pairs'][:,1]])
+                    A_mat[I, J] += (reg_r2/(R_vdw[A_idx]**4)) * sum_r2_I * sum_r2_J
+
+    if w_ovlp > 0.0 and aux_basis is not None:
+        A_mat += w_ovlp * (ovlp3c_I_proj @ ovlp3c_I.T)
+        b_tensor += w_ovlp * (ovlp3c_parent.reshape(-1, N_aux) @ ovlp3c_I_proj.T).reshape(Np, Np, M_pairs)
+
+    # Populate Constraints
+    d_tensor = np.zeros((Np, Np, n_constraints))
+    d_tensor[:, :, 0] = S_parent
+    col_idx = 1
+    
+    if constrain_dipole:
+        C_mat[:, col_idx:col_idx+3] = V_pairs
+        for x in range(3):
+            d_tensor[:, :, col_idx+x] = mu_parent[x]
+        col_idx += 3
+        
+    if constrain_quad:
+        for q, (i, j, f, w) in enumerate(quad_map):
+            C_mat[:, col_idx+q] = V_quad_pairs[:, q]
+            d_tensor[:, :, col_idx+q] = rr_parent[f]
+
+    if reg > 0.0:
+        A_mat += reg * np.eye(M_pairs)
+        
+    # Solve System
+    X_I_nm = solve_kkt_tensor_reshaped(A_mat, b_tensor, C_mat, d_tensor)
+    Q_A = np.zeros((mol.natm, Np, Np))
+
+    for I, pI in enumerate(spherical_pairs):
+        Q_A[pI['atom']] -= X_I_nm[I, :, :] * C_mat[I, 0]
+
+    if return_fit:
+        return Q_A, A_mat_df, b_tensor_df, X_I_nm
+    return Q_A  
+    
+    
+def getDMFitChargeOperatorSphericalNew(mol, min_basis='minao', reg=1e-12, reg_r2=0.0, reg_S=0.0, 
+                                    w_df=1.0, w_mu=0.0, w_ovlp=0.0, w_quad=0.0, aux_basis='weigend-jfit', 
+                                    return_fit=False, constrain_dipole=False, constrain_quad=False):
+    """
+    Fits the orbital pair density to a minimal basis atom-centered spherically
+    symmetric density, and extracts the charge operator Q_{A, nm}.
+    """
+    
+    # =========================================================================
+    # Build Minimal Basis & Pre-Compute Global Integrals
+    # =========================================================================
+    
+    atom_mols = []
+    min_ao_ranges = []
+    ao_offset = 0
+    #t0 = timer()
+    for i in range(mol.natm):
+        atm_mol = gto.Mole()
+        atm_mol.atom = [[mol.atom_symbol(i), mol.atom_coord(i)]] 
+        atm_mol.unit = 'Bohr'
+        atm_mol.basis = min_basis
+        atm_mol.spin = 0
+        atm_mol.charge = mol.atom_charge(i)
+        atm_mol.build()
+        atom_mols.append(atm_mol)
+        
+        min_ao_ranges.append((ao_offset, ao_offset + atm_mol.nao))
+        ao_offset += atm_mol.nao
+
+    # Out-of-place addition to prevent shallow copy mutation bugs
+    min_mol = atom_mols[0]
+    for atm in atom_mols[1:]:
+        min_mol = min_mol + atm
+
+    Np = mol.nao
+    nshl_parent, nshl_min = mol.nbas, min_mol.nbas
+    #print("initial mol set-up:", timer()-t0)
+    S_parent = mol.intor('int1e_ovlp')
+    mu_parent = -mol.intor('int1e_r') 
+    rr_parent = mol.intor('int1e_rr')
+    
+    # =========================================================================
+    # Construct Spherically Averaged Basis Pairs & Local Vectors
+    # =========================================================================
+    spherical_pairs = []
+    S_atomic, mu_atomic_shifted, r_atomic, rr_atomic, r2_atomic = [], [], [], [], []
+
+    for A, mol_A in enumerate(atom_mols):
+        R_A = mol.atom_coord(A) 
+        
+        mol_A.set_common_orig(R_A)
+        mu_atomic_shifted.append(-mol_A.intor('int1e_r'))
+        r_atomic.append(mol_A.intor('int1e_r'))
+        rr_atomic.append(mol_A.intor('int1e_rr'))
+        r2_atomic.append(mol_A.intor('int1e_r2'))
+        mol_A.set_common_orig((0.0, 0.0, 0.0))
+        S_atomic.append(mol_A.intor('int1e_ovlp'))
+
+        ao_loc = mol_A.ao_loc_nr()
+        n_shells = mol_A.nbas
+        
+        for i in range(n_shells):
+            l_i = mol_A.bas_angular(i)
+            for j in range(i + 1):
+                if l_i == mol_A.bas_angular(j):
+                    a_idx, b_idx = np.arange(ao_loc[i], ao_loc[i+1]), np.arange(ao_loc[j], ao_loc[j+1])
+                    spherical_pairs.append({
+                        'atom': A,
+                        'ab_pairs': np.column_stack((a_idx, b_idx)),
+                        'min_ao_a': min_ao_ranges[A][0] + a_idx,
+                        'min_ao_b': min_ao_ranges[A][0] + b_idx
+                    })
+
+    M_pairs = len(spherical_pairs)
+
+    # Pre-compute Global Contributions
+    V_pairs = np.zeros((M_pairs, 3))
+    V_quad_pairs = np.zeros((M_pairs, 6))
+    
+    for I, pI in enumerate(spherical_pairs):
+        A_idx = pI['atom']
+        R_A = mol.atom_coord(A_idx)
+        a, b = pI['ab_pairs'][:, 0], pI['ab_pairs'][:, 1]
+        
+        sum_mu = np.sum(mu_atomic_shifted[A_idx][:, a, b], axis=1)
+        sum_S = np.sum(S_atomic[A_idx][a, b])
+        V_pairs[I] = sum_mu - sum_S * R_A
+            
+        if w_quad > 0.0 or constrain_quad:
+            for q, (i, j, f, w) in enumerate(quad_map):
+                V_quad_pairs[I, q] = (np.sum(rr_atomic[A_idx][f, a, b]) + 
+                                      R_A[j] * np.sum(r_atomic[A_idx][i, a, b]) + 
+                                      R_A[i] * np.sum(r_atomic[A_idx][j, a, b]) + 
+                                      R_A[i] * R_A[j] * sum_S)
+    
+    
+    # =========================================================================
+    # Build Auxiliary Basis Metric (L2 Overlap)
+    # =========================================================================
+
+    if w_ovlp > 0.0 and aux_basis is not None:
+        auxmol = df.make_auxmol(mol, aux_basis)
+        N_aux, nshl_aux = auxmol.nao, auxmol.nbas
+        
+        S_aux_inv = np.linalg.pinv(auxmol.intor('int1e_ovlp'), rcond=1e-8)
+        mol_parent_aux = mol + auxmol
+        ovlp3c_parent = mol_parent_aux.intor('int3c1e', shls_slice=(0, nshl_parent, 0, nshl_parent, nshl_parent, nshl_parent + nshl_aux))
+        
+        ovlp3c_min_aux = (min_mol + auxmol).intor('int3c1e', shls_slice=(0, nshl_min, 0, nshl_min, nshl_min, nshl_min + nshl_aux))
+        ovlp3c_I = np.array([np.sum(ovlp3c_min_aux[pI['min_ao_a'], pI['min_ao_b'], :], axis=0) for pI in spherical_pairs])
+        ovlp3c_I_proj = ovlp3c_I @ S_aux_inv
+    
+    # =========================================================================
+    # Build Vectorized KKT Matrices (Optimized Atom-Block ERI Processing)
+    # =========================================================================
+    n_constraints = 1 + (3 if constrain_dipole else 0) + (6 if constrain_quad else 0)
+    C_mat = np.zeros((M_pairs, n_constraints))
+    b_tensor_df = np.zeros((Np, Np, M_pairs))
+    A_mat_df = np.zeros((M_pairs, M_pairs))
+
+    # Group pairs by atom to localize ERI calculations
+    pairs_by_atom = [[] for _ in range(mol.natm)]
+    for I, pI in enumerate(spherical_pairs):
+        pairs_by_atom[pI['atom']].append((I, pI))
+
+    for A, atm_mol_A in enumerate(atom_mols):
+        if not pairs_by_atom[A]:
+            continue
+            
+        # 1. Compute (parent, parent | A, A) localized ERIs
+        mol_parent_A = mol + atm_mol_A
+        nshl_A = atm_mol_A.nbas
+        slice_parent_A = (0, nshl_parent, 0, nshl_parent, 
+                          nshl_parent, nshl_parent + nshl_A, 
+                          nshl_parent, nshl_parent + nshl_A)
+        eri_parent_A = mol_parent_A.intor('int2e', shls_slice=slice_parent_A)
+        
+        for I, pI in pairs_by_atom[A]:
+            a_loc, b_loc = pI['ab_pairs'][:, 0], pI['ab_pairs'][:, 1]
+            C_mat[I, 0] = np.sum(S_atomic[A][a_loc, b_loc])
+            b_tensor_df[:, :, I] = np.sum(eri_parent_A[:, :, a_loc, b_loc], axis=-1)
+
+        # 2. Compute (A, A | B, B) localized ERIs
+        for B in range(A, mol.natm):
+            atm_mol_B = atom_mols[B]
+            if not pairs_by_atom[B]:
+                continue
+                
+            mol_A_B = atm_mol_A + atm_mol_B
+            nshl_B = atm_mol_B.nbas
+            slice_AB = (0, nshl_A, 0, nshl_A, nshl_A, nshl_A + nshl_B, nshl_A, nshl_A + nshl_B)
+            eri_A_B = mol_A_B.intor('int2e', shls_slice=slice_AB)
+            
+            for I, pI in pairs_by_atom[A]:
+                a_loc, b_loc = pI['ab_pairs'][:, 0], pI['ab_pairs'][:, 1]
+                for J, pJ in pairs_by_atom[B]:
+                    c_loc, d_loc = pJ['ab_pairs'][:, 0], pJ['ab_pairs'][:, 1]
+                    
+                    val = np.sum(eri_A_B[a_loc, b_loc][:, c_loc, d_loc])
+                    A_mat_df[I, J] = val
+                    if A != B: # Mirror the off-diagonal atom blocks
+                        A_mat_df[J, I] = val
+
+    # Apply Weights and Penalities
+    b_tensor = w_df * b_tensor_df.copy()
+    A_mat = w_df * A_mat_df.copy()
+
+    if reg_S > 0.0:
+        b_tensor += reg_S * np.einsum('i,jk->jki', C_mat[:, 0], S_parent)
+        A_mat += reg_S * np.outer(C_mat[:, 0], C_mat[:, 0])
+        
+    if w_mu > 0.0:
+        for x in range(3):
+            b_tensor += w_mu * np.einsum('i,jk->jki', V_pairs[:, x], mu_parent[x])
+        A_mat += w_mu * (V_pairs @ V_pairs.T)
+        
+    if w_quad > 0.0:
+        W_vec = np.array([w for (_, _, _, w) in quad_map])
+        for q, (i, j, f, w) in enumerate(quad_map):
+            b_tensor += w_quad * w * np.einsum('i,jk->jki', V_quad_pairs[:, q], rr_parent[f])
+        A_mat += w_quad * (V_quad_pairs * W_vec) @ V_quad_pairs.T
+        
+    if reg_r2 > 0.0:
+        R_vdw = radii.VDW[min_mol.atom_charges()]
+        for I, pI in enumerate(spherical_pairs):
+            A_idx = pI['atom']
+            sum_r2_I = np.sum(r2_atomic[A_idx][pI['ab_pairs'][:,0], pI['ab_pairs'][:,1]])
+            for J, pJ in enumerate(spherical_pairs):
+                if A_idx == pJ['atom']:
+                    sum_r2_J = np.sum(r2_atomic[A_idx][pJ['ab_pairs'][:,0], pJ['ab_pairs'][:,1]])
+                    A_mat[I, J] += (reg_r2/(R_vdw[A_idx]**4)) * sum_r2_I * sum_r2_J
+
+    if w_ovlp > 0.0 and aux_basis is not None:
+        A_mat += w_ovlp * (ovlp3c_I_proj @ ovlp3c_I.T)
+        b_tensor += w_ovlp * (ovlp3c_parent.reshape(-1, N_aux) @ ovlp3c_I_proj.T).reshape(Np, Np, M_pairs)
+
+    # Populate Constraints
+    d_tensor = np.zeros((Np, Np, n_constraints))
+    d_tensor[:, :, 0] = S_parent
+    col_idx = 1
+    
+    if constrain_dipole:
+        C_mat[:, col_idx:col_idx+3] = V_pairs
+        for x in range(3):
+            d_tensor[:, :, col_idx+x] = mu_parent[x]
+        col_idx += 3
+        
+    if constrain_quad:
+        for q, (i, j, f, w) in enumerate(quad_map):
+            C_mat[:, col_idx+q] = V_quad_pairs[:, q]
+            d_tensor[:, :, col_idx+q] = rr_parent[f]
+
+    if reg > 0.0:
+        A_mat += reg * np.eye(M_pairs)
+        
+    # Solve System
+    X_I_nm = solve_kkt_tensor_reshaped(A_mat, b_tensor, C_mat, d_tensor)
+    Q_A = np.zeros((mol.natm, Np, Np))
+
+    for I, pI in enumerate(spherical_pairs):
+        Q_A[pI['atom']] -= X_I_nm[I, :, :] * C_mat[I, 0]
+
+    if return_fit:
+        return Q_A, A_mat_df, b_tensor_df, X_I_nm
+    return Q_A    
+
+
+
+# Hard-coded Clebsch-Gordan coefficients for L=1
+# Format: CG_L1[(l1, l2)][M] = [(m1, m2, coeff), ...]
+# where M, m1, m2 are PySCF magnetic quantum number indices
+
+
+
+def getDMFitChargeOperatorSphericalNew2(mol, min_basis='minao', reg=1e-12, reg_r2=0.0, reg_S=0.0, 
+                                    w_df=1.0, w_mu=0.0, w_ovlp=0.0, w_quad=0.0, aux_basis='weigend-jfit', 
+                                    return_fit=False, constrain_dipole=False, constrain_quad=False):
+    
+    #t0 = timer()
+    
+    # =========================================================================
+    # FAST SETUP: Single Global Build (No atm_mols)
+    # =========================================================================
+    min_mol = gto.Mole()
+    min_mol.atom = mol.atom 
+    min_mol.unit = mol.unit
+    min_mol.basis = min_basis
+    min_mol.charge = mol.charge
+    min_mol.spin = mol.spin
+    min_mol.build(dump_input=False, parse_arg=False)
+
+    Np = mol.nao
+    nshl_parent = mol.nbas
+    nshl_min = min_mol.nbas
+    min_aoslices = min_mol.aoslice_by_atom()
+    ao_loc = min_mol.ao_loc_nr()
+    
+    # Pre-build the combined molecule ONCE for cross-ERIs
+    mol_parent_min = mol + min_mol
+
+    #print("initial mol set-up:", timer() - t0)
+
+    # Global integrals for parent
+    S_parent = mol.intor('int1e_ovlp')
+    mu_parent = -mol.intor('int1e_r') 
+    rr_parent = mol.intor('int1e_rr')
+
+    # Global 1-electron integrals for min_mol (No manual origin shifting needed)
+    S_min_global = min_mol.intor('int1e_ovlp')
+    r_min_global = min_mol.intor('int1e_r')
+    mu_min_global = -r_min_global
+    rr_min_global = min_mol.intor('int1e_rr')
+    r2_min_global = min_mol.intor('int1e_r2')
+
+    # =========================================================================
+    # Construct Spherically Averaged Basis Pairs
+    # =========================================================================
+    spherical_pairs = []
+
+    for A in range(mol.natm):
+        shl0, shl1, ao0, ao1 = min_aoslices[A]
+        for i_g in range(shl0, shl1):
+            l_i = min_mol.bas_angular(i_g)
+            for j_g in range(shl0, i_g + 1):
+                if l_i == min_mol.bas_angular(j_g):
+                    a_idx_global = np.arange(ao_loc[i_g], ao_loc[i_g+1])
+                    b_idx_global = np.arange(ao_loc[j_g], ao_loc[j_g+1])
+                    
+                    # Local AO indices perfectly map to the isolated shell slices
+                    spherical_pairs.append({
+                        'atom': A,
+                        'ab_pairs': np.column_stack((a_idx_global - ao0, b_idx_global - ao0)),
+                        'min_ao_a': a_idx_global,
+                        'min_ao_b': b_idx_global
+                    })
+
+    M_pairs = len(spherical_pairs)
+
+    # Pre-compute Global Contributions
+    V_pairs = np.zeros((M_pairs, 3))
+    V_quad_pairs = np.zeros((M_pairs, 6))
+    S_pair_vals = np.zeros(M_pairs)
+    r2_shifted_pair_vals = np.zeros(M_pairs)
+    
+    for I, pI in enumerate(spherical_pairs):
+        a_g, b_g = pI['min_ao_a'], pI['min_ao_b']
+        R_A = mol.atom_coord(pI['atom'])
+        
+        sum_S = np.sum(S_min_global[a_g, b_g])
+        S_pair_vals[I] = sum_S
+        
+        # Unshifted global arrays analytically cancel out the manual shift
+        V_pairs[I] = np.sum(mu_min_global[:, a_g, b_g], axis=1)
+            
+        if w_quad > 0.0 or constrain_quad:
+            for q, (i, j, f, w) in enumerate(quad_map):
+                V_quad_pairs[I, q] = np.sum(rr_min_global[f, a_g, b_g])
+                
+        if reg_r2 > 0.0:
+            # Analytically shift the atom-centered variance for reg_r2
+            sum_r = np.sum(r_min_global[:, a_g, b_g], axis=1)
+            sum_r2 = np.sum(r2_min_global[a_g, b_g])
+            r2_shifted_pair_vals[I] = sum_r2 - 2.0 * np.dot(R_A, sum_r) + np.dot(R_A, R_A) * sum_S
+            
+    # =========================================================================
+    # Build Auxiliary Basis Metric (L2 Overlap)
+    # =========================================================================
+    if w_ovlp > 0.0 and aux_basis is not None:
+        auxmol = df.make_auxmol(mol, aux_basis)
+        N_aux, nshl_aux = auxmol.nao, auxmol.nbas
+        
+        S_aux_inv = np.linalg.pinv(auxmol.intor('int1e_ovlp'), rcond=1e-8)
+        mol_parent_aux = mol + auxmol
+        ovlp3c_parent = mol_parent_aux.intor('int3c1e', shls_slice=(0, nshl_parent, 0, nshl_parent, nshl_parent, nshl_parent + nshl_aux))
+        
+        ovlp3c_min_aux = (min_mol + auxmol).intor('int3c1e', shls_slice=(0, nshl_min, 0, nshl_min, nshl_min, nshl_min + nshl_aux))
+        ovlp3c_I = np.array([np.sum(ovlp3c_min_aux[pI['min_ao_a'], pI['min_ao_b'], :], axis=0) for pI in spherical_pairs])
+        ovlp3c_I_proj = ovlp3c_I @ S_aux_inv
+
+    # =========================================================================
+    # Build Vectorized KKT Matrices (Optimized Atom-Block ERI Processing)
+    # =========================================================================
+    n_constraints = 1 + (3 if constrain_dipole else 0) + (6 if constrain_quad else 0)
+    C_mat = np.zeros((M_pairs, n_constraints))
+    b_tensor_df = np.zeros((Np, Np, M_pairs))
+    A_mat_df = np.zeros((M_pairs, M_pairs))
+
+    pairs_by_atom = [[] for _ in range(mol.natm)]
+    for I, pI in enumerate(spherical_pairs):
+        pairs_by_atom[pI['atom']].append((I, pI))
+
+    for A in range(mol.natm):
+        if not pairs_by_atom[A]:
+            continue
+            
+        shl0_A, shl1_A, ao0_A, ao1_A = min_aoslices[A]
+        
+        # 1. Compute (parent, parent | A, A) ERIs directly from combined mol
+        slice_parent_A = (0, nshl_parent, 0, nshl_parent, 
+                          nshl_parent + shl0_A, nshl_parent + shl1_A, 
+                          nshl_parent + shl0_A, nshl_parent + shl1_A)
+        eri_parent_A = mol_parent_min.intor('int2e', shls_slice=slice_parent_A)
+        
+        for I, pI in pairs_by_atom[A]:
+            a_loc, b_loc = pI['ab_pairs'][:, 0], pI['ab_pairs'][:, 1]
+            C_mat[I, 0] = S_pair_vals[I]
+            b_tensor_df[:, :, I] = np.sum(eri_parent_A[:, :, a_loc, b_loc], axis=-1)
+
+        # 2. Compute (A, A | B, B) ERIs directly from min_mol
+        for B in range(A, mol.natm):
+            if not pairs_by_atom[B]:
+                continue
+                
+            shl0_B, shl1_B, ao0_B, ao1_B = min_aoslices[B]
+            slice_AB = (shl0_A, shl1_A, shl0_A, shl1_A, shl0_B, shl1_B, shl0_B, shl1_B)
+            eri_A_B = min_mol.intor('int2e', shls_slice=slice_AB)
+            
+            for I, pI in pairs_by_atom[A]:
+                a_loc, b_loc = pI['ab_pairs'][:, 0], pI['ab_pairs'][:, 1]
+                for J, pJ in pairs_by_atom[B]:
+                    c_loc, d_loc = pJ['ab_pairs'][:, 0], pJ['ab_pairs'][:, 1]
+                    
+                    val = np.sum(eri_A_B[a_loc, b_loc][:, c_loc, d_loc])
+                    A_mat_df[I, J] = val
+                    if A != B: 
+                        A_mat_df[J, I] = val
+
+    # Apply Weights and Penalities
+    b_tensor = w_df * b_tensor_df.copy()
+    A_mat = w_df * A_mat_df.copy()
+
+    if reg_S > 0.0:
+        b_tensor += reg_S * np.einsum('i,jk->jki', C_mat[:, 0], S_parent)
+        A_mat += reg_S * np.outer(C_mat[:, 0], C_mat[:, 0])
+        
+    if w_mu > 0.0:
+        for x in range(3):
+            b_tensor += w_mu * np.einsum('i,jk->jki', V_pairs[:, x], mu_parent[x])
+        A_mat += w_mu * (V_pairs @ V_pairs.T)
+        
+    if w_quad > 0.0:
+        W_vec = np.array([w for (_, _, _, w) in quad_map])
+        for q, (i, j, f, w) in enumerate(quad_map):
+            b_tensor += w_quad * w * np.einsum('i,jk->jki', V_quad_pairs[:, q], rr_parent[f])
+        A_mat += w_quad * (V_quad_pairs * W_vec) @ V_quad_pairs.T
+        
+    if reg_r2 > 0.0:
+        R_vdw = radii.VDW[min_mol.atom_charges()]
+        for I, pI in enumerate(spherical_pairs):
+            A_idx = pI['atom']
+            sum_r2_I = r2_shifted_pair_vals[I]
+            for J, pJ in enumerate(spherical_pairs):
+                if A_idx == pJ['atom']:
+                    sum_r2_J = r2_shifted_pair_vals[J]
+                    A_mat[I, J] += (reg_r2/(R_vdw[A_idx]**4)) * sum_r2_I * sum_r2_J
+
+    if w_ovlp > 0.0 and aux_basis is not None:
+        A_mat += w_ovlp * (ovlp3c_I_proj @ ovlp3c_I.T)
+        b_tensor += w_ovlp * (ovlp3c_parent.reshape(-1, N_aux) @ ovlp3c_I_proj.T).reshape(Np, Np, M_pairs)
+
+    # Populate Constraints
+    d_tensor = np.zeros((Np, Np, n_constraints))
+    d_tensor[:, :, 0] = S_parent
+    col_idx = 1
+    
+    if constrain_dipole:
+        C_mat[:, col_idx:col_idx+3] = V_pairs
+        for x in range(3):
+            d_tensor[:, :, col_idx+x] = mu_parent[x]
+        col_idx += 3
+        
+    if constrain_quad:
+        for q, (i, j, f, w) in enumerate(quad_map):
+            C_mat[:, col_idx+q] = V_quad_pairs[:, q]
+            d_tensor[:, :, col_idx+q] = rr_parent[f]
+
+    if reg > 0.0:
+        A_mat += reg * np.eye(M_pairs)
+        
+    # Solve System
+    X_I_nm = solve_kkt_tensor_reshaped(A_mat, b_tensor, C_mat, d_tensor)
+    Q_A = np.zeros((mol.natm, Np, Np))
+
+    for I, pI in enumerate(spherical_pairs):
+        Q_A[pI['atom']] -= X_I_nm[I, :, :] * C_mat[I, 0]
+
+    if return_fit:
+        return Q_A, A_mat_df, b_tensor_df, X_I_nm
+    return Q_A
+
+
+CG_L1 = {
+    (0, 1): {
+        0: [(0, 0, 1.0)],
+        1: [(0, 1, 1.0)],
+        2: [(0, 2, 1.0)]
+    },
+    (1, 0): {
+        0: [(0, 0, 1.0)],
+        1: [(1, 0, 1.0)],
+        2: [(2, 0, 1.0)]
+    },
+    (1, 2): {
+        0: [(0, 2,  0.31622776601683794), (0, 4,  0.5477225575051661), 
+            (1, 1, -0.5477225575051661), (2, 0, -0.5477225575051661)],
+        1: [(0, 1, -0.5477225575051661), (1, 2, -0.6324555320336759), 
+            (2, 3, -0.5477225575051661)],
+        2: [(0, 0, -0.5477225575051661), (1, 3, -0.5477225575051661), 
+            (2, 2,  0.31622776601683794), (2, 4, -0.5477225575051661)]
+    },
+    (2, 1): {
+        0: [(2, 0,  0.31622776601683794), (4, 0,  0.5477225575051661), 
+            (1, 1, -0.5477225575051661), (0, 2, -0.5477225575051661)],
+        1: [(1, 0, -0.5477225575051661), (2, 1, -0.6324555320336759), 
+            (3, 2, -0.5477225575051661)],
+        2: [(0, 0, -0.5477225575051661), (3, 1, -0.5477225575051661), 
+            (2, 2,  0.31622776601683794), (4, 2, -0.5477225575051661)]
+    }
+}
+
+valence_l_values = [
+    [0, 1],    # 0: H (Z=1) - include p for polarisation
+    [0, 1],    # 1: He (Z=2) - include p for polarisation
+    [0, 1],    # 2: Li (Z=3) - include p for polarisation
+    [0, 1],    # 3: Be (Z=4) - include p for polarisation
+    [0, 1],    # 4: B (Z=5)
+    [0, 1],    # 5: C (Z=6)
+    [0, 1],    # 6: N (Z=7)
+    [0, 1],    # 7: O (Z=8)
+    [0, 1],    # 8: F (Z=9)
+    [0, 1],    # 9: Ne (Z=10)
+    [0, 1],    # 10: Na (Z=11)
+    [0, 1],    # 11: Mg (Z=12)
+    [0, 1],    # 12: Al (Z=13)
+    [0, 1],    # 13: Si (Z=14)
+    [0, 1],    # 14: P (Z=15)
+    [0, 1],    # 15: S (Z=16)
+    [0, 1],    # 16: Cl (Z=17)
+    [0, 1],    # 17: Ar (Z=18)
+    [0, 1],    # 18: K (Z=19)
+    [0, 1],    # 19: Ca (Z=20)
+    [0, 1, 2], # 20: Sc (Z=21) - include 3d
+    [0, 1, 2], # 21: Ti (Z=22) - include 3d
+    [0, 1, 2], # 22: V (Z=23) - include 3d
+    [0, 1, 2], # 23: Cr (Z=24) - include 3d
+    [0, 1, 2], # 24: Mn (Z=25) - include 3d
+    [0, 1, 2], # 25: Fe (Z=26) - include 3d
+    [0, 1, 2], # 26: Co (Z=27) - include 3d
+    [0, 1, 2], # 27: Ni (Z=28) - include 3d
+    [0, 1, 2], # 28: Cu (Z=29) - include 3d
+    [0, 1, 2], # 29: Zn (Z=30) - include 3d
+    [0, 1],    # 30: Ga (Z=31) - treat 3d as core
+    [0, 1],    # 31: Ge (Z=32) - treat 3d as core
+    [0, 1],    # 32: As (Z=33) - treat 3d as core
+    [0, 1],    # 33: Se (Z=34) - treat 3d as core
+    [0, 1],    # 34: Br (Z=35) - treat 3d as core
+    [0, 1]     # 35: Kr (Z=36) - treat 3d as core
+]
+
+def getDMFitChargeOperatorDipoleSphericalOld(mol, min_basis='minao', reg=1e-12, reg_r2=0.0, reg_S=0.0, 
+                                          w_mu=0.0, w_ovlp=0.0, w_quad=0.0, w_df=1.0, reg_dip=0.0,
+                                          aux_basis=None, return_fit=False, 
+                                          constrain_dipole=False, constrain_quad=False):
+    """
+    Fits the orbital pair density to a minimal basis atom-centered spherically
+    symmetric density AND exact L=1 representations of the valence shell.
+    """
+    atom_mols = []
+    for i in range(mol.natm):
+        atm_mol = gto.Mole()
+        atm_mol.atom = [[mol.atom_symbol(i), mol.atom_coord(i)]] 
+        atm_mol.unit = 'Bohr'
+        atm_mol.basis = min_basis
+        atm_mol.spin = 0
+        atm_mol.charge = mol.atom_charge(i)
+        atm_mol.build()
+        atom_mols.append(atm_mol)
+    
+    min_mol = atom_mols[0]
+    for i in range(1, len(atom_mols)):
+        min_mol = min_mol + atom_mols[i]
+    
+    R_vdw = radii.VDW[min_mol.atom_charges()]
+    Np = mol.nao
+    nshl_parent = mol.nbas
+    
+    # 1e integrals
+    S_parent = mol.intor('int1e_ovlp')
+    mu_parent = -mol.intor('int1e_r')
+    rr_parent = mol.intor('int1e_rr') 
+
+    # =========================================================================
+    # Construct Spherically Averaged & L=1 Basis Pairs
+    # =========================================================================
+    fitted_pairs = []
+    S_atomic = []  
+    mu_atomic_shifted = [] 
+    r_atomic = []
+    rr_atomic = []
+    r2_atomic = []  
+
+    for A in range(mol.natm):
+        mol_A = atom_mols[A]
+        R_A = mol.atom_coord(A) 
+        
+        mol_A.set_common_orig(R_A)
+        S_atomic.append(mol_A.intor('int1e_ovlp'))
+        mu_atomic_shifted.append(-mol_A.intor('int1e_r'))
+        r_atomic.append(mol_A.intor('int1e_r'))
+        rr_atomic.append(mol_A.intor('int1e_rr'))
+        r2_atomic.append(mol_A.intor('int1e_r2'))
+        mol_A.set_common_orig((0.0, 0.0, 0.0))
+
+        # Identify valence shells
+        ao_labels = mol_A.ao_labels(fmt=False) 
+        nl_to_aos = {}
+        for idx, label in enumerate(ao_labels):
+            nl = label[2]  
+            if nl not in nl_to_aos:
+                nl_to_aos[nl] = []
+            nl_to_aos[nl].append(idx)
+            
+        Z = mol.atom_charge(A)
+        # Assumes valence_l_values is defined globally or passed in
+        if Z - 1 < len(valence_l_values):
+            allowed_l_vals = valence_l_values[Z - 1]
+        else:
+            allowed_l_vals = [0, 1, 2, 3] 
+            
+        l_map = {0: 's', 1: 'p', 2: 'd', 3: 'f', 4: 'g'}
+        allowed_l_chars = [l_map.get(l, '') for l in allowed_l_vals]
+
+        val_nls = set()
+        for l_char in allowed_l_chars:
+            nls_with_l = [nl for nl in nl_to_aos.keys() if nl.endswith(l_char)]
+            if nls_with_l:
+                nls_with_l.sort(key=lambda x: int(x[:-1]) if x[:-1].isdigit() else 0)
+                val_nls.add(nls_with_l[-1])
+
+        n_shells = mol_A.nbas
+        ao_loc = mol_A.ao_loc_nr()
+        
+        # Track valence shell IDs
+        val_shells_idx = []
+        for i in range(n_shells):
+            l_i = mol_A.bas_angular(i)
+            start_i = ao_loc[i]
+            nl = ao_labels[start_i][2]
+            
+            if nl in val_nls:
+                if l_i > 2:
+                    raise ValueError(f"Valence shell '{nl}' on atom {A} contains l > 2, which is unsupported for L=1 hard-coding.")
+                val_shells_idx.append(i)
+
+        # 1. Spherically Averaged (L=0) Pairs (ForAll Shells)
+        for i in range(n_shells):
+            l_i = mol_A.bas_angular(i)
+            for j in range(i + 1):
+                l_j = mol_A.bas_angular(j)
+                if l_i == l_j:
+                    start_i, end_i = ao_loc[i], ao_loc[i+1]
+                    start_j, end_j = ao_loc[j], ao_loc[j+1]
+                    # Format is now (a, b, coeff)
+                    ab_pairs = [(start_i + m, start_j + m, 1.0) for m in range(end_i - start_i)]
+                    fitted_pairs.append({'atom': A, 'ab_pairs': ab_pairs, 'L': 0}) # Tagged as L=0
+
+        # 2. Add L=1 representation of Valence-Valence shell mixing
+        for i_idx in range(len(val_shells_idx)):
+            i = val_shells_idx[i_idx]
+            l_i = mol_A.bas_angular(i)
+            start_i = ao_loc[i]
+            
+            for j_idx in range(i_idx): # j_idx < i_idx intrinsically guarantees l_i != l_j for valence
+                j = val_shells_idx[j_idx]
+                l_j = mol_A.bas_angular(j)
+                start_j = ao_loc[j]
+                
+                if (l_i, l_j) in CG_L1:
+                    cg_dict = CG_L1[(l_i, l_j)]
+                    for M in [0, 1, 2]: # Generate 3 density basis functions for M=-1, 0, 1
+                        ab_pairs = []
+                        for m_i, m_j, coeff in cg_dict[M]:
+                            ab_pairs.append((start_i + m_i, start_j + m_j, coeff))
+                        fitted_pairs.append({'atom': A, 'ab_pairs': ab_pairs, 'L': 1}) # Tagged as L=1
+
+    M_pairs = len(fitted_pairs)
+
+    # =========================================================================
+    # Overlap Metric Preparation
+    # =========================================================================
+    if w_ovlp > 0.0 and aux_basis is not None:
+        #print(f"Preparing Overlap (L2) metric using aux_basis: {aux_basis}...")
+        
+        auxmol = df.make_auxmol(mol, aux_basis)
+        N_aux = auxmol.nao
+        nshl_aux = auxmol.nbas
+        
+        S_aux = auxmol.intor('int1e_ovlp')
+        S_aux_inv = np.linalg.pinv(S_aux, rcond=1e-8)
+        
+        mol_parent_aux = mol + auxmol
+        shls_slice = (0, nshl_parent, 0, nshl_parent, nshl_parent, nshl_parent + nshl_aux)
+        ovlp3c_parent = mol_parent_aux.intor('int3c1e', shls_slice=shls_slice)
+        
+        ovlp3c_A_list = []
+        for A in range(mol.natm):
+            mol_A = atom_mols[A]
+            mol_A_aux = mol_A + auxmol
+            shls_slice = (0, mol_A.nbas, 0, mol_A.nbas, mol_A.nbas, mol_A.nbas + nshl_aux)
+            ovlp3c_A_list.append(mol_A_aux.intor('int3c1e', shls_slice=shls_slice))
+            
+        ovlp3c_I = np.zeros((M_pairs, N_aux))
+        for I, pair_I in enumerate(fitted_pairs):
+            A_idx = pair_I['atom']
+            for a, b, c_ab in pair_I['ab_pairs']:
+                ovlp3c_I[I, :] += c_ab * ovlp3c_A_list[A_idx][a, b, :]
+            
+        ovlp3c_I_proj = ovlp3c_I @ S_aux_inv
+
+    # =========================================================================
+    # Pre-compute Global Contributions (Dipole & Quadrupole)
+    # =========================================================================
+    V_pairs = np.zeros((M_pairs, 3))
+    V_quad_pairs = np.zeros((M_pairs, 6))
+
+    for I, pair_I in enumerate(fitted_pairs):
+        A_idx = pair_I['atom']
+        R_A = mol.atom_coord(A_idx)
+        ab_list = pair_I['ab_pairs']
+        
+        for x in range(3):
+            sum_mu = sum(c_ab * mu_atomic_shifted[A_idx][x, a, b] for a, b, c_ab in ab_list)
+            sum_S = sum(c_ab * S_atomic[A_idx][a, b] for a, b, c_ab in ab_list)
+            V_pairs[I, x] = sum_mu - sum_S * R_A[x]
+            
+        for q, (i, j, f, w) in enumerate(quad_map):
+            sum_rr = sum(c_ab * rr_atomic[A_idx][f, a, b] for a, b, c_ab in ab_list)
+            sum_ri = sum(c_ab * r_atomic[A_idx][i, a, b] for a, b, c_ab in ab_list)
+            sum_rj = sum(c_ab * r_atomic[A_idx][j, a, b] for a, b, c_ab in ab_list)
+            sum_S = sum(c_ab * S_atomic[A_idx][a, b] for a, b, c_ab in ab_list)
+            V_quad_pairs[I, q] = sum_rr + R_A[j]*sum_ri + R_A[i]*sum_rj + R_A[i]*R_A[j]*sum_S
+
+    n_constraints = 1
+    if constrain_dipole: n_constraints += 3
+    if constrain_quad: n_constraints += 6
+
+    A_mat = np.zeros((M_pairs, M_pairs))
+    b_tensor = np.zeros((Np, Np, M_pairs))
+    C_mat = np.zeros((M_pairs, n_constraints))
+    A_mat_df = np.zeros((M_pairs, M_pairs))
+    b_tensor_df = np.zeros((Np, Np, M_pairs))
+
+    #print(f"Building KKT Matrices for {M_pairs} basis components...")
+
+    for I, pair_I in enumerate(fitted_pairs):
+        A_idx = pair_I['atom']
+        ab_list = pair_I['ab_pairs']
+        
+        for (a, b, c_ab) in ab_list:
+            C_mat[I, 0] += c_ab * S_atomic[A_idx][a, b]
+            
+        if reg_S > 0.0:
+            b_tensor[:, :, I] += reg_S * C_mat[I, 0] * S_parent
+            
+        if w_mu > 0.0:
+            for x in range(3):
+                b_tensor[:, :, I] += w_mu * V_pairs[I, x] * mu_parent[x]
+                
+        if w_quad > 0.0:
+            for q, (i, j, f, w) in enumerate(quad_map):
+                b_tensor[:, :, I] += w_quad * w * V_quad_pairs[I, q] * rr_parent[f]
+            
+        for J, pair_J in enumerate(fitted_pairs):
+            B_idx = pair_J['atom']
+            cd_list = pair_J['ab_pairs']
+            
+            if reg_S > 0.0:
+                sum_S_B = sum(c_cd * S_atomic[B_idx][c, d] for c, d, c_cd in cd_list)
+                A_mat[I, J] += reg_S * C_mat[I, 0] * sum_S_B
+                
+            if w_mu > 0.0:
+                A_mat[I, J] += w_mu * np.dot(V_pairs[I], V_pairs[J])
+                
+            if w_quad > 0.0:
+                quad_penalty = sum(w * V_quad_pairs[I, q] * V_quad_pairs[J, q] for q, (i, j, f, w) in enumerate(quad_map))
+                A_mat[I, J] += w_quad * quad_penalty
+            
+            if reg_r2 > 0.0 and A_idx == B_idx:
+                sum_r2_A = sum(c_ab * r2_atomic[A_idx][a, b] for a, b, c_ab in ab_list)
+                sum_r2_B = sum(c_cd * r2_atomic[B_idx][c, d] for c, d, c_cd in cd_list)
+                A_mat[I, J] += (reg_r2/(R_vdw[A_idx]**4)) * sum_r2_A * sum_r2_B
+
+
+    # =========================================================================
+    # Optimized Targeted ERI Integral Evaluation via Vectorized Contractions
+    # =========================================================================
+    #print("Evaluating targeted ERI integrals (Optimized Vectorized)...")
+    
+    ao2shl_mols = []
+    ao_loc_mols = []
+    for A in range(mol.natm):
+        ao_loc = atom_mols[A].ao_loc_nr()
+        ao2shl = {ao: shl for shl in range(atom_mols[A].nbas) 
+                          for ao in range(ao_loc[shl], ao_loc[shl+1])}
+        ao2shl_mols.append(ao2shl)
+        ao_loc_mols.append(ao_loc)
+
+    # 1. Build Shell-Pair Mappings for Fast Einsum Operations
+    shell_pairs = {}
+    for I, pair_I in enumerate(fitted_pairs):
+        A = pair_I['atom']
+        for a, b, c_ab in pair_I['ab_pairs']:
+            shl_a = ao2shl_mols[A][a]
+            shl_b = ao2shl_mols[A][b]
+            a_loc = a - ao_loc_mols[A][shl_a]
+            b_loc = b - ao_loc_mols[A][shl_b]
+            
+            sp_key = (A, shl_a, shl_b)
+            if sp_key not in shell_pairs:
+                na = ao_loc_mols[A][shl_a+1] - ao_loc_mols[A][shl_a]
+                nb = ao_loc_mols[A][shl_b+1] - ao_loc_mols[A][shl_b]
+                shell_pairs[sp_key] = {'na': na, 'nb': nb, 'tasks': []}
+            shell_pairs[sp_key]['tasks'].append((I, a_loc, b_loc, c_ab))
+
+    for sp_key, sp_data in shell_pairs.items():
+        na, nb = sp_data['na'], sp_data['nb']
+        I_set = sorted(list(set([t[0] for t in sp_data['tasks']])))
+        I_map = {I: idx for idx, I in enumerate(I_set)}
+        
+        C_I = np.zeros((len(I_set), na, nb))
+        for (I, a_loc, b_loc, c_ab) in sp_data['tasks']:
+            C_I[I_map[I], a_loc, b_loc] += c_ab
+            
+        sp_data['I_set'] = I_set
+        sp_data['C_I'] = C_I
+
+    # 2. Pre-combine molecules entirely to avoid overhead re-compilation
+    mol_comb = mol + min_mol
+    min_mol_shl_offset = [0]
+    for A in range(mol.natm - 1):
+        min_mol_shl_offset.append(min_mol_shl_offset[-1] + atom_mols[A].nbas)
+
+    # 3. Process Integrals via Tensor Blocks
+    sp_keys = list(shell_pairs.keys())
+    for i_idx, sp_P in enumerate(sp_keys):
+        A, shl_a, shl_b = sp_P
+        data_P = shell_pairs[sp_P]
+        I_set, C_I = data_P['I_set'], data_P['C_I']
+        
+        shl_a_min = min_mol_shl_offset[A] + shl_a
+        shl_b_min = min_mol_shl_offset[A] + shl_b
+        
+        # Parent-Aux integrals for b_tensor 
+        shls_slice_b = (0, nshl_parent, 0, nshl_parent, 
+                        nshl_parent + shl_a_min, nshl_parent + shl_a_min + 1, 
+                        nshl_parent + shl_b_min, nshl_parent + shl_b_min + 1)
+        eri_b = mol_comb.intor('int2e', shls_slice=shls_slice_b)
+        
+        # Vectorized b_tensor update
+        b_upd = np.einsum('pqab,iab->pqi', eri_b, C_I, optimize=True)
+        for idx, I in enumerate(I_set):
+            val = w_df * b_upd[:, :, idx]
+            b_tensor[:, :, I] += val
+            b_tensor_df[:, :, I] += val
+            
+        # Aux-Aux integrals for A_mat (exploiting lower triangular symmetry)
+        for j_idx in range(i_idx + 1):
+            sp_Q = sp_keys[j_idx]
+            B, shl_c, shl_d = sp_Q
+            data_Q = shell_pairs[sp_Q]
+            J_set, C_J = data_Q['I_set'], data_Q['C_I']
+            
+            shl_c_min = min_mol_shl_offset[B] + shl_c
+            shl_d_min = min_mol_shl_offset[B] + shl_d
+            
+            shls_slice_A = (shl_a_min, shl_a_min+1, shl_b_min, shl_b_min+1, 
+                            shl_c_min, shl_c_min+1, shl_d_min, shl_d_min+1)
+            eri_A = min_mol.intor('int2e', shls_slice=shls_slice_A)
+            
+            # Vectorized A_mat update
+            A_upd = np.einsum('iab,jcd,abcd->ij', C_I, C_J, eri_A, optimize=True)
+            
+            for idx_i, I in enumerate(I_set):
+                for idx_j, J in enumerate(J_set):
+                    val = w_df * A_upd[idx_i, idx_j]
+                    A_mat[I, J] += val
+                    A_mat_df[I, J] += val
+                    if i_idx != j_idx:
+                        A_mat[J, I] += val
+                        A_mat_df[J, I] += val
+
+
+    if w_ovlp > 0.0 and aux_basis is not None:
+        #print("Adding Auxiliary Overlap Metric Penalty...")
+        A_mat += w_ovlp * (ovlp3c_I_proj @ ovlp3c_I.T)
+        ovlp3c_parent_flat = ovlp3c_parent.reshape(-1, N_aux)
+        b_ovlp_flat = ovlp3c_parent_flat @ ovlp3c_I_proj.T
+        b_tensor += w_ovlp * b_ovlp_flat.reshape(Np, Np, M_pairs)
+
+    # Populate Constraints
+    d_tensor = np.zeros((Np, Np, n_constraints))
+    d_tensor[:, :, 0] = S_parent
+    col_idx = 1
+    
+    if constrain_dipole:
+        C_mat[:, col_idx:col_idx+3] = V_pairs
+        for x in range(3):
+            d_tensor[:, :, col_idx+x] = mu_parent[x]
+        col_idx += 3
+        
+    if constrain_quad:
+        for q, (i, j, f, w) in enumerate(quad_map):
+            C_mat[:, col_idx+q] = V_quad_pairs[:, q]
+            d_tensor[:, :, col_idx+q] = rr_parent[f]
+        col_idx += 6
+    
+    # -------------------------------------------------------------------------
+    # Apply Standard and Dipole-Specific (L=1) Regularization
+    # -------------------------------------------------------------------------
+    if reg > 0.0:
+        A_mat += reg * np.eye(M_pairs)
+        
+    if reg_dip > 0.0:
+        for I, pair_I in enumerate(fitted_pairs):
+            if pair_I.get('L') == 1:
+                A_mat[I, I] += reg_dip
+    
+    #print("Solving KKT system...")
+    X_I_nm = solve_kkt_tensor_reshaped(A_mat, b_tensor, C_mat, d_tensor)
+
+    Q_A = np.zeros((mol.natm, Np, Np))
+    mu_A = np.zeros((mol.natm, 3, Np, Np))
+
+    for I, pair_I in enumerate(fitted_pairs):
+        A_idx = pair_I['atom']
+        ab_list = pair_I['ab_pairs']
+        
+        Q_A[A_idx] -= X_I_nm[I, :, :] * C_mat[I, 0]
+
+        for x in range(3):
+            sum_mu = sum(c_ab * mu_atomic_shifted[A_idx][x, a, b] for a, b, c_ab in ab_list)
+            mu_A[A_idx, x] += X_I_nm[I, :, :] * sum_mu
+
+    #print("Done!")
+    if return_fit:
+        return Q_A, mu_A, A_mat_df, b_tensor_df, X_I_nm
+    else:
+        return Q_A, mu_A  
+    
+
+
+
+
+def getDMFitChargeOperatorDipoleSphericalNew(mol, min_basis='minao', reg=1e-12, reg_r2=0.0, reg_S=0.0, 
+                                          w_mu=0.0, w_ovlp=0.0, w_quad=0.0, w_df=1.0, reg_dip=0.0,
+                                          aux_basis=None, return_fit=False, 
+                                          constrain_dipole=False, constrain_quad=False):
+    """
+    Fits the orbital pair density to a minimal basis atom-centered spherically
+    symmetric density AND exact L=1 representations of the valence shell.
+    (Optimized with vectorized NumPy KKT operations)
+    """
+    atom_mols = []
+    for i in range(mol.natm):
+        atm_mol = gto.Mole()
+        atm_mol.atom = [[mol.atom_symbol(i), mol.atom_coord(i)]] 
+        atm_mol.unit = 'Bohr'
+        atm_mol.basis = min_basis
+        atm_mol.spin = 0
+        atm_mol.charge = mol.atom_charge(i)
+        atm_mol.build()
+        atom_mols.append(atm_mol)
+    
+    min_mol = atom_mols[0]
+    for i in range(1, len(atom_mols)):
+        min_mol = min_mol + atom_mols[i]
+    
+    R_vdw = radii.VDW[min_mol.atom_charges()]
+    Np = mol.nao
+    nshl_parent = mol.nbas
+    
+    # 1e integrals
+    S_parent = mol.intor('int1e_ovlp')
+    mu_parent = -mol.intor('int1e_r')
+    rr_parent = mol.intor('int1e_rr') 
+
+    # =========================================================================
+    # Construct Spherically Averaged & L=1 Basis Pairs
+    # =========================================================================
+    fitted_pairs = []
+    S_atomic = []  
+    mu_atomic_shifted = [] 
+    r_atomic = []
+    rr_atomic = []
+    r2_atomic = []  
+
+    for A in range(mol.natm):
+        mol_A = atom_mols[A]
+        R_A = mol.atom_coord(A) 
+        
+        mol_A.set_common_orig(R_A)
+        S_atomic.append(mol_A.intor('int1e_ovlp'))
+        mu_atomic_shifted.append(-mol_A.intor('int1e_r'))
+        r_atomic.append(mol_A.intor('int1e_r'))
+        rr_atomic.append(mol_A.intor('int1e_rr'))
+        r2_atomic.append(mol_A.intor('int1e_r2'))
+        mol_A.set_common_orig((0.0, 0.0, 0.0))
+
+        # Identify valence shells
+        ao_labels = mol_A.ao_labels(fmt=False) 
+        nl_to_aos = {}
+        for idx, label in enumerate(ao_labels):
+            nl = label[2]  
+            if nl not in nl_to_aos:
+                nl_to_aos[nl] = []
+            nl_to_aos[nl].append(idx)
+            
+        Z = mol.atom_charge(A)
+        if Z - 1 < len(valence_l_values):
+            allowed_l_vals = valence_l_values[Z - 1]
+        else:
+            allowed_l_vals = [0, 1, 2, 3] 
+            
+        l_map = {0: 's', 1: 'p', 2: 'd', 3: 'f', 4: 'g'}
+        allowed_l_chars = [l_map.get(l, '') for l in allowed_l_vals]
+
+        val_nls = set()
+        for l_char in allowed_l_chars:
+            nls_with_l = [nl for nl in nl_to_aos.keys() if nl.endswith(l_char)]
+            if nls_with_l:
+                nls_with_l.sort(key=lambda x: int(x[:-1]) if x[:-1].isdigit() else 0)
+                val_nls.add(nls_with_l[-1])
+
+        n_shells = mol_A.nbas
+        ao_loc = mol_A.ao_loc_nr()
+        
+        # Track valence shell IDs
+        val_shells_idx = []
+        for i in range(n_shells):
+            l_i = mol_A.bas_angular(i)
+            start_i = ao_loc[i]
+            nl = ao_labels[start_i][2]
+            
+            if nl in val_nls:
+                if l_i > 2:
+                    raise ValueError(f"Valence shell '{nl}' on atom {A} contains l > 2, unsupported for L=1.")
+                val_shells_idx.append(i)
+
+        # 1. Spherically Averaged (L=0) Pairs (ForAll Shells)
+        for i in range(n_shells):
+            l_i = mol_A.bas_angular(i)
+            for j in range(i + 1):
+                l_j = mol_A.bas_angular(j)
+                if l_i == l_j:
+                    start_i, end_i = ao_loc[i], ao_loc[i+1]
+                    start_j, end_j = ao_loc[j], ao_loc[j+1]
+                    ab_pairs = [(start_i + m, start_j + m, 1.0) for m in range(end_i - start_i)]
+                    fitted_pairs.append({'atom': A, 'ab_pairs': ab_pairs, 'L': 0})
+
+        # 2. Add L=1 representation of Valence-Valence shell mixing
+        for i_idx in range(len(val_shells_idx)):
+            i = val_shells_idx[i_idx]
+            l_i = mol_A.bas_angular(i)
+            start_i = ao_loc[i]
+            
+            for j_idx in range(i_idx): 
+                j = val_shells_idx[j_idx]
+                l_j = mol_A.bas_angular(j)
+                start_j = ao_loc[j]
+                
+                if (l_i, l_j) in CG_L1:
+                    cg_dict = CG_L1[(l_i, l_j)]
+                    for M in [0, 1, 2]: 
+                        ab_pairs = []
+                        for m_i, m_j, coeff in cg_dict[M]:
+                            ab_pairs.append((start_i + m_i, start_j + m_j, coeff))
+                        fitted_pairs.append({'atom': A, 'ab_pairs': ab_pairs, 'L': 1})
+
+    M_pairs = len(fitted_pairs)
+
+    # =========================================================================
+    # Overlap Metric Preparation
+    # =========================================================================
+    if w_ovlp > 0.0 and aux_basis is not None:
+        auxmol = df.make_auxmol(mol, aux_basis)
+        N_aux = auxmol.nao
+        nshl_aux = auxmol.nbas
+        
+        S_aux = auxmol.intor('int1e_ovlp')
+        S_aux_inv = np.linalg.pinv(S_aux, rcond=1e-8)
+        
+        mol_parent_aux = mol + auxmol
+        shls_slice = (0, nshl_parent, 0, nshl_parent, nshl_parent, nshl_parent + nshl_aux)
+        ovlp3c_parent = mol_parent_aux.intor('int3c1e', shls_slice=shls_slice)
+        
+        ovlp3c_A_list = []
+        for A in range(mol.natm):
+            mol_A = atom_mols[A]
+            mol_A_aux = mol_A + auxmol
+            shls_slice = (0, mol_A.nbas, 0, mol_A.nbas, mol_A.nbas, mol_A.nbas + nshl_aux)
+            ovlp3c_A_list.append(mol_A_aux.intor('int3c1e', shls_slice=shls_slice))
+            
+        ovlp3c_I = np.zeros((M_pairs, N_aux))
+        for I, pair_I in enumerate(fitted_pairs):
+            A_idx = pair_I['atom']
+            for a, b, c_ab in pair_I['ab_pairs']:
+                ovlp3c_I[I, :] += c_ab * ovlp3c_A_list[A_idx][a, b, :]
+            
+        ovlp3c_I_proj = ovlp3c_I @ S_aux_inv
+
+    # =========================================================================
+    # Pre-compute Global Contributions (Dipole & Quadrupole)
+    # =========================================================================
+    V_pairs = np.zeros((M_pairs, 3))
+    V_quad_pairs = np.zeros((M_pairs, 6))
+    
+    # Pre-allocate arrays for vectorization
+    C_vec = np.zeros(M_pairs)
+    sum_r2_vec = np.zeros(M_pairs)
+    mu_vec_sums = np.zeros((M_pairs, 3))
+    atom_idx_vec = np.zeros(M_pairs, dtype=int)
+
+    for I, pair_I in enumerate(fitted_pairs):
+        A_idx = pair_I['atom']
+        R_A = mol.atom_coord(A_idx)
+        ab_list = pair_I['ab_pairs']
+        atom_idx_vec[I] = A_idx
+        
+        # Scalar overlaps & r2
+        sum_S = sum(c_ab * S_atomic[A_idx][a, b] for a, b, c_ab in ab_list)
+        C_vec[I] = sum_S
+        
+        if reg_r2 > 0.0:
+            sum_r2_vec[I] = sum(c_ab * r2_atomic[A_idx][a, b] for a, b, c_ab in ab_list)
+        
+        # Dipole contributions
+        for x in range(3):
+            sum_mu = sum(c_ab * mu_atomic_shifted[A_idx][x, a, b] for a, b, c_ab in ab_list)
+            mu_vec_sums[I, x] = sum_mu
+            V_pairs[I, x] = sum_mu - sum_S * R_A[x]
+            
+        # Quadrupole contributions
+        if w_quad > 0.0 or constrain_quad:
+            for q, (i, j, f, w) in enumerate(quad_map):
+                sum_rr = sum(c_ab * rr_atomic[A_idx][f, a, b] for a, b, c_ab in ab_list)
+                sum_ri = sum(c_ab * r_atomic[A_idx][i, a, b] for a, b, c_ab in ab_list)
+                sum_rj = sum(c_ab * r_atomic[A_idx][j, a, b] for a, b, c_ab in ab_list)
+                V_quad_pairs[I, q] = sum_rr + R_A[j]*sum_ri + R_A[i]*sum_rj + R_A[i]*R_A[j]*sum_S
+
+    n_constraints = 1
+    if constrain_dipole: n_constraints += 3
+    if constrain_quad: n_constraints += 6
+
+    A_mat = np.zeros((M_pairs, M_pairs))
+    b_tensor = np.zeros((Np, Np, M_pairs))
+    C_mat = np.zeros((M_pairs, n_constraints))
+    A_mat_df = np.zeros((M_pairs, M_pairs))
+    b_tensor_df = np.zeros((Np, Np, M_pairs))
+
+    # =========================================================================
+    # FAST Vectorized KKT Construction
+    # =========================================================================
+    C_mat[:, 0] = C_vec
+
+    if reg_S > 0.0:
+        b_tensor += reg_S * np.einsum('ij,I->ijI', S_parent, C_vec, optimize=True)
+        A_mat += reg_S * np.outer(C_vec, C_vec)
+        
+    if w_mu > 0.0:
+        b_tensor += w_mu * np.einsum('Ix,xij->ijI', V_pairs, mu_parent, optimize=True)
+        A_mat += w_mu * (V_pairs @ V_pairs.T)
+        
+    if w_quad > 0.0:
+        w_arr = np.array([q[3] for q in quad_map])
+        f_arr = [q[2] for q in quad_map]
+        rr_parent_sub = rr_parent[f_arr]  # Shape: (n_q, Np, Np)
+        weighted_V_quad = w_quad * w_arr * V_quad_pairs # Shape: (M_pairs, n_q)
+        
+        b_tensor += np.einsum('Iq,qij->ijI', weighted_V_quad, rr_parent_sub, optimize=True)
+        A_mat += weighted_V_quad @ V_quad_pairs.T
+        
+    if reg_r2 > 0.0:
+        atom_mask = (atom_idx_vec[:, None] == atom_idx_vec[None, :])
+        r2_scaled = sum_r2_vec / (R_vdw[atom_idx_vec]**2) 
+        A_mat += reg_r2 * atom_mask * np.outer(r2_scaled, r2_scaled)
+
+
+    # =========================================================================
+    # Optimized Targeted ERI Integral Evaluation via Vectorized Contractions
+    # =========================================================================
+    ao2shl_mols = []
+    ao_loc_mols = []
+    for A in range(mol.natm):
+        ao_loc = atom_mols[A].ao_loc_nr()
+        ao2shl = {ao: shl for shl in range(atom_mols[A].nbas) 
+                          for ao in range(ao_loc[shl], ao_loc[shl+1])}
+        ao2shl_mols.append(ao2shl)
+        ao_loc_mols.append(ao_loc)
+
+    # 1. Build Shell-Pair Mappings
+    shell_pairs = {}
+    for I, pair_I in enumerate(fitted_pairs):
+        A = pair_I['atom']
+        for a, b, c_ab in pair_I['ab_pairs']:
+            shl_a = ao2shl_mols[A][a]
+            shl_b = ao2shl_mols[A][b]
+            a_loc = a - ao_loc_mols[A][shl_a]
+            b_loc = b - ao_loc_mols[A][shl_b]
+            
+            sp_key = (A, shl_a, shl_b)
+            if sp_key not in shell_pairs:
+                na = ao_loc_mols[A][shl_a+1] - ao_loc_mols[A][shl_a]
+                nb = ao_loc_mols[A][shl_b+1] - ao_loc_mols[A][shl_b]
+                shell_pairs[sp_key] = {'na': na, 'nb': nb, 'tasks': []}
+            shell_pairs[sp_key]['tasks'].append((I, a_loc, b_loc, c_ab))
+
+    for sp_key, sp_data in shell_pairs.items():
+        na, nb = sp_data['na'], sp_data['nb']
+        I_set = sorted(list(set([t[0] for t in sp_data['tasks']])))
+        I_map = {I: idx for idx, I in enumerate(I_set)}
+        
+        C_I = np.zeros((len(I_set), na, nb))
+        for (I, a_loc, b_loc, c_ab) in sp_data['tasks']:
+            C_I[I_map[I], a_loc, b_loc] += c_ab
+            
+        sp_data['I_set'] = I_set
+        sp_data['C_I'] = C_I
+
+    # 2. Pre-combine molecules
+    mol_comb = mol + min_mol
+    min_mol_shl_offset = [0]
+    for A in range(mol.natm - 1):
+        min_mol_shl_offset.append(min_mol_shl_offset[-1] + atom_mols[A].nbas)
+
+    # 3. Process Integrals via Tensor Blocks
+    sp_keys = list(shell_pairs.keys())
+    for i_idx, sp_P in enumerate(sp_keys):
+        A, shl_a, shl_b = sp_P
+        data_P = shell_pairs[sp_P]
+        I_set, C_I = data_P['I_set'], data_P['C_I']
+        
+        shl_a_min = min_mol_shl_offset[A] + shl_a
+        shl_b_min = min_mol_shl_offset[A] + shl_b
+        
+        # Parent-Aux integrals
+        shls_slice_b = (0, nshl_parent, 0, nshl_parent, 
+                        nshl_parent + shl_a_min, nshl_parent + shl_a_min + 1, 
+                        nshl_parent + shl_b_min, nshl_parent + shl_b_min + 1)
+        eri_b = mol_comb.intor('int2e', shls_slice=shls_slice_b)
+        
+        # FAST Update: Block assignment into b_tensor
+        b_upd = np.einsum('pqab,iab->pqi', eri_b, C_I, optimize=True)
+        val_b = w_df * b_upd
+        b_tensor[:, :, I_set] += val_b
+        b_tensor_df[:, :, I_set] += val_b
+            
+        # Aux-Aux integrals
+        for j_idx in range(i_idx + 1):
+            sp_Q = sp_keys[j_idx]
+            B, shl_c, shl_d = sp_Q
+            data_Q = shell_pairs[sp_Q]
+            J_set, C_J = data_Q['I_set'], data_Q['C_I']
+            
+            shl_c_min = min_mol_shl_offset[B] + shl_c
+            shl_d_min = min_mol_shl_offset[B] + shl_d
+            
+            shls_slice_A = (shl_a_min, shl_a_min+1, shl_b_min, shl_b_min+1, 
+                            shl_c_min, shl_c_min+1, shl_d_min, shl_d_min+1)
+            eri_A = min_mol.intor('int2e', shls_slice=shls_slice_A)
+            
+            # FAST Update: Block assignment into A_mat
+            A_upd = np.einsum('iab,jcd,abcd->ij', C_I, C_J, eri_A, optimize=True)
+            val_A = w_df * A_upd
+            
+            A_mat[np.ix_(I_set, J_set)] += val_A
+            A_mat_df[np.ix_(I_set, J_set)] += val_A
+            
+            if i_idx != j_idx:
+                A_mat[np.ix_(J_set, I_set)] += val_A.T
+                A_mat_df[np.ix_(J_set, I_set)] += val_A.T
+
+
+    if w_ovlp > 0.0 and aux_basis is not None:
+        A_mat += w_ovlp * (ovlp3c_I_proj @ ovlp3c_I.T)
+        ovlp3c_parent_flat = ovlp3c_parent.reshape(-1, N_aux)
+        b_ovlp_flat = ovlp3c_parent_flat @ ovlp3c_I_proj.T
+        b_tensor += w_ovlp * b_ovlp_flat.reshape(Np, Np, M_pairs)
+
+    # Populate Constraints
+    d_tensor = np.zeros((Np, Np, n_constraints))
+    d_tensor[:, :, 0] = S_parent
+    col_idx = 1
+    
+    if constrain_dipole:
+        C_mat[:, col_idx:col_idx+3] = V_pairs
+        for x in range(3):
+            d_tensor[:, :, col_idx+x] = mu_parent[x]
+        col_idx += 3
+        
+    if constrain_quad:
+        for q, (i, j, f, w) in enumerate(quad_map):
+            C_mat[:, col_idx+q] = V_quad_pairs[:, q]
+            d_tensor[:, :, col_idx+q] = rr_parent[f]
+        col_idx += 6
+    
+    # -------------------------------------------------------------------------
+    # Apply Standard and Dipole-Specific (L=1) Regularization
+    # -------------------------------------------------------------------------
+    if reg > 0.0:
+        A_mat += reg * np.eye(M_pairs)
+        
+    if reg_dip > 0.0:
+        for I, pair_I in enumerate(fitted_pairs):
+            if pair_I.get('L') == 1:
+                A_mat[I, I] += reg_dip
+    
+    X_I_nm = solve_kkt_tensor_reshaped(A_mat, b_tensor, C_mat, d_tensor)
+
+    # =========================================================================
+    # FAST Vectorized Output Tensor Generation
+    # =========================================================================
+    Q_A = np.zeros((mol.natm, Np, Np))
+    mu_A = np.zeros((mol.natm, 3, Np, Np))
+
+    for A in range(mol.natm):
+        I_mask = (atom_idx_vec == A)
+        if not np.any(I_mask):
+            continue
+            
+        X_A = X_I_nm[I_mask]           # Shape: (M_A, Np, Np)
+        C_A = C_mat[I_mask, 0]         # Shape: (M_A)
+        
+        Q_A[A] = -np.einsum('Iij,I->ij', X_A, C_A, optimize=True)
+        mu_A[A] = np.einsum('Iij,Ix->xij', X_A, mu_vec_sums[I_mask], optimize=True)
+
+    if return_fit:
+        return Q_A, mu_A, A_mat_df, b_tensor_df, X_I_nm
+    else:
+        return Q_A, mu_A
+    
+
+
+
+def getDMFitChargeOperatorDipoleSphericalNew2(mol, min_basis='minao', reg=1e-12, reg_r2=0.0, reg_S=0.0, 
+                                          w_mu=0.0, w_ovlp=0.0, w_quad=0.0, w_df=1.0, reg_dip=0.0,
+                                          aux_basis=None, return_fit=False, 
+                                          constrain_dipole=False, constrain_quad=False):
+    t0 = timer()
+
+    # =========================================================================
+    # FAST SETUP: Single Global Build
+    # =========================================================================
+    min_mol = gto.Mole()
+    min_mol.atom = mol.atom 
+    min_mol.unit = mol.unit
+    min_mol.basis = min_basis
+    min_mol.charge = mol.charge
+    min_mol.spin = mol.spin
+    min_mol.build(dump_input=False, parse_arg=False)
+
+    Np = mol.nao
+    nshl_parent = mol.nbas
+    nshl_min = min_mol.nbas
+    min_aoslices = min_mol.aoslice_by_atom()
+    ao_loc = min_mol.ao_loc_nr()
+    ao_labels = min_mol.ao_labels(fmt=False)
+    
+    mol_parent_min = mol + min_mol
+    R_vdw = radii.VDW[min_mol.atom_charges()]
+
+    # Global 1-electron integrals (No manual origin shifting needed)
+    S_parent = mol.intor('int1e_ovlp')
+    mu_parent = -mol.intor('int1e_r')
+    rr_parent = mol.intor('int1e_rr') 
+
+    S_min_global = min_mol.intor('int1e_ovlp')
+    r_min_global = min_mol.intor('int1e_r')
+    mu_min_global = -r_min_global
+    rr_min_global = min_mol.intor('int1e_rr')
+    r2_min_global = min_mol.intor('int1e_r2')
+
+    # =========================================================================
+    # Construct Spherically Averaged & L=1 Basis Pairs
+    # =========================================================================
+    fitted_pairs = []
+
+    for A in range(mol.natm):
+        shl0_A, shl1_A, ao0_A, ao1_A = min_aoslices[A]
+        R_A = mol.atom_coord(A) 
+        
+        # Identify valence shells for atom A
+        nl_to_aos = {}
+        for global_idx in range(ao0_A, ao1_A):
+            nl = ao_labels[global_idx][2]
+            if nl not in nl_to_aos:
+                nl_to_aos[nl] = []
+            nl_to_aos[nl].append(global_idx)
+            
+        Z = mol.atom_charge(A)
+        allowed_l_vals = valence_l_values[Z - 1] if Z - 1 < len(valence_l_values) else [0, 1, 2, 3] 
+        l_map = {0: 's', 1: 'p', 2: 'd', 3: 'f', 4: 'g'}
+        allowed_l_chars = [l_map.get(l, '') for l in allowed_l_vals]
+
+        val_nls = set()
+        for l_char in allowed_l_chars:
+            nls_with_l = [nl for nl in nl_to_aos.keys() if nl.endswith(l_char)]
+            if nls_with_l:
+                nls_with_l.sort(key=lambda x: int(x[:-1]) if x[:-1].isdigit() else 0)
+                val_nls.add(nls_with_l[-1])
+
+        val_shells_global_idx = []
+        for i_g in range(shl0_A, shl1_A):
+            start_ao_g = ao_loc[i_g]
+            nl = ao_labels[start_ao_g][2]
+            if nl in val_nls:
+                l_i = min_mol.bas_angular(i_g)
+                if l_i > 2:
+                    raise ValueError(f"Valence shell '{nl}' on atom {A} contains l > 2, unsupported for L=1.")
+                val_shells_global_idx.append(i_g)
+
+        # 1. Spherically Averaged (L=0) Pairs
+        for i_g in range(shl0_A, shl1_A):
+            l_i = min_mol.bas_angular(i_g)
+            for j_g in range(shl0_A, i_g + 1):
+                l_j = min_mol.bas_angular(j_g)
+                if l_i == l_j:
+                    start_i, end_i = ao_loc[i_g], ao_loc[i_g+1]
+                    start_j, end_j = ao_loc[j_g], ao_loc[j_g+1]
+                    
+                    a_g = np.arange(start_i, end_i)
+                    b_g = np.arange(start_j, end_j)
+                    coeffs = np.ones(len(a_g))
+                    
+                    fitted_pairs.append({
+                        'atom': A, 'L': 0,
+                        'a_loc': a_g - ao0_A, 'b_loc': b_g - ao0_A,
+                        'a_g': a_g, 'b_g': b_g, 'coeffs': coeffs
+                    })
+
+        # 2. Add L=1 representation of Valence-Valence shell mixing
+        for i_idx in range(len(val_shells_global_idx)):
+            i_g = val_shells_global_idx[i_idx]
+            l_i = min_mol.bas_angular(i_g)
+            start_i = ao_loc[i_g]
+            
+            for j_idx in range(i_idx): 
+                j_g = val_shells_global_idx[j_idx]
+                l_j = min_mol.bas_angular(j_g)
+                start_j = ao_loc[j_g]
+                
+                if (l_i, l_j) in CG_L1:
+                    cg_dict = CG_L1[(l_i, l_j)]
+                    for M in [0, 1, 2]: 
+                        a_g_list, b_g_list, c_list = [], [], []
+                        for m_i, m_j, coeff in cg_dict[M]:
+                            a_g_list.append(start_i + m_i)
+                            b_g_list.append(start_j + m_j)
+                            c_list.append(coeff)
+                            
+                        fitted_pairs.append({
+                            'atom': A, 'L': 1,
+                            'a_loc': np.array(a_g_list) - ao0_A,
+                            'b_loc': np.array(b_g_list) - ao0_A,
+                            'a_g': np.array(a_g_list), 'b_g': np.array(b_g_list),
+                            'coeffs': np.array(c_list)
+                        })
+
+    M_pairs = len(fitted_pairs)
+
+    # =========================================================================
+    # Overlap Metric Preparation
+    # =========================================================================
+    if w_ovlp > 0.0 and aux_basis is not None:
+        auxmol = df.make_auxmol(mol, aux_basis)
+        N_aux, nshl_aux = auxmol.nao, auxmol.nbas
+        
+        S_aux_inv = np.linalg.pinv(auxmol.intor('int1e_ovlp'), rcond=1e-8)
+        ovlp3c_parent = (mol + auxmol).intor('int3c1e', shls_slice=(0, nshl_parent, 0, nshl_parent, nshl_parent, nshl_parent + nshl_aux))
+        ovlp3c_min_aux = (min_mol + auxmol).intor('int3c1e', shls_slice=(0, nshl_min, 0, nshl_min, nshl_min, nshl_min + nshl_aux))
+        
+        ovlp3c_I = np.zeros((M_pairs, N_aux))
+        for I, pI in enumerate(fitted_pairs):
+            ovlp3c_I[I] = np.sum(pI['coeffs'][:, None] * ovlp3c_min_aux[pI['a_g'], pI['b_g'], :], axis=0)
+            
+        ovlp3c_I_proj = ovlp3c_I @ S_aux_inv
+
+    # =========================================================================
+    # Pre-compute Global Contributions (Analytically Shifted)
+    # =========================================================================
+    V_pairs = np.zeros((M_pairs, 3))
+    V_quad_pairs = np.zeros((M_pairs, 6))
+    
+    C_vec = np.zeros(M_pairs)
+    sum_r2_vec = np.zeros(M_pairs)
+    mu_vec_sums = np.zeros((M_pairs, 3))
+    atom_idx_vec = np.zeros(M_pairs, dtype=int)
+
+    for I, pI in enumerate(fitted_pairs):
+        A_idx = pI['atom']
+        R_A = mol.atom_coord(A_idx)
+        a_g, b_g, c = pI['a_g'], pI['b_g'], pI['coeffs']
+        atom_idx_vec[I] = A_idx
+        
+        sum_S = np.sum(c * S_min_global[a_g, b_g])
+        C_vec[I] = sum_S
+        
+        # Analytically Shifted 1e Math 
+        sum_mu_global = np.sum(c * mu_min_global[:, a_g, b_g], axis=1)
+        mu_vec_sums[I] = sum_mu_global + sum_S * R_A  # Shifted mu
+        V_pairs[I] = sum_mu_global                    # Exact cancellation 
+            
+        if w_quad > 0.0 or constrain_quad:
+            for q, (i, j, f, w) in enumerate(quad_map):
+                V_quad_pairs[I, q] = np.sum(c * rr_min_global[f, a_g, b_g]) # Exact cancellation
+                
+        if reg_r2 > 0.0:
+            sum_r2_global = np.sum(c * r2_min_global[a_g, b_g])
+            sum_r_global = np.sum(c * r_min_global[:, a_g, b_g], axis=1)
+            sum_r2_vec[I] = sum_r2_global - 2.0 * np.dot(R_A, sum_r_global) + np.dot(R_A, R_A) * sum_S
+
+    n_constraints = 1 + (3 if constrain_dipole else 0) + (6 if constrain_quad else 0)
+    C_mat = np.zeros((M_pairs, n_constraints))
+    b_tensor_df = np.zeros((Np, Np, M_pairs))
+    A_mat_df = np.zeros((M_pairs, M_pairs))
+
+    # =========================================================================
+    # FAST Vectorized Atom-Block ERI Processing
+    # =========================================================================
+    pairs_by_atom = [[] for _ in range(mol.natm)]
+    for I, pI in enumerate(fitted_pairs):
+        pairs_by_atom[pI['atom']].append((I, pI))
+
+    for A in range(mol.natm):
+        if not pairs_by_atom[A]: continue
+            
+        shl0_A, shl1_A, ao0_A, ao1_A = min_aoslices[A]
+        slice_parent_A = (0, nshl_parent, 0, nshl_parent, 
+                          nshl_parent + shl0_A, nshl_parent + shl1_A, 
+                          nshl_parent + shl0_A, nshl_parent + shl1_A)
+        eri_parent_A = mol_parent_min.intor('int2e', shls_slice=slice_parent_A)
+        
+        for I, pI in pairs_by_atom[A]:
+            a_loc, b_loc, c_I = pI['a_loc'], pI['b_loc'], pI['coeffs']
+            b_tensor_df[:, :, I] = np.sum(c_I * eri_parent_A[:, :, a_loc, b_loc], axis=-1)
+
+        for B in range(A, mol.natm):
+            if not pairs_by_atom[B]: continue
+                
+            shl0_B, shl1_B, ao0_B, ao1_B = min_aoslices[B]
+            slice_AB = (shl0_A, shl1_A, shl0_A, shl1_A, shl0_B, shl1_B, shl0_B, shl1_B)
+            eri_A_B = min_mol.intor('int2e', shls_slice=slice_AB)
+            
+            for I, pI in pairs_by_atom[A]:
+                a_loc, b_loc, c_I = pI['a_loc'], pI['b_loc'], pI['coeffs']
+                for J, pJ in pairs_by_atom[B]:
+                    c_loc, d_loc, c_J = pJ['a_loc'], pJ['b_loc'], pJ['coeffs']
+                    
+                    val = np.sum(np.outer(c_I, c_J) * eri_A_B[a_loc, b_loc][:, c_loc, d_loc])
+                    A_mat_df[I, J] = val
+                    if A != B: 
+                        A_mat_df[J, I] = val
+
+    # =========================================================================
+    # Apply Weights, Metrics, and Regularization
+    # =========================================================================
+    b_tensor = w_df * b_tensor_df.copy()
+    A_mat = w_df * A_mat_df.copy()
+    C_mat[:, 0] = C_vec
+
+    if reg_S > 0.0:
+        b_tensor += reg_S * np.einsum('ij,I->ijI', S_parent, C_vec, optimize=True)
+        A_mat += reg_S * np.outer(C_vec, C_vec)
+        
+    if w_mu > 0.0:
+        b_tensor += w_mu * np.einsum('Ix,xij->ijI', V_pairs, mu_parent, optimize=True)
+        A_mat += w_mu * (V_pairs @ V_pairs.T)
+        
+    if w_quad > 0.0:
+        w_arr = np.array([q[3] for q in quad_map])
+        f_arr = [q[2] for q in quad_map]
+        weighted_V_quad = w_quad * w_arr * V_quad_pairs 
+        b_tensor += np.einsum('Iq,qij->ijI', weighted_V_quad, rr_parent[f_arr], optimize=True)
+        A_mat += weighted_V_quad @ V_quad_pairs.T
+        
+    if reg_r2 > 0.0:
+        atom_mask = (atom_idx_vec[:, None] == atom_idx_vec[None, :])
+        r2_scaled = sum_r2_vec / (R_vdw[atom_idx_vec]**2) 
+        A_mat += reg_r2 * atom_mask * np.outer(r2_scaled, r2_scaled)
+
+    if w_ovlp > 0.0 and aux_basis is not None:
+        A_mat += w_ovlp * (ovlp3c_I_proj @ ovlp3c_I.T)
+        b_ovlp_flat = ovlp3c_parent.reshape(-1, N_aux) @ ovlp3c_I_proj.T
+        b_tensor += w_ovlp * b_ovlp_flat.reshape(Np, Np, M_pairs)
+
+    # Populate Constraints
+    d_tensor = np.zeros((Np, Np, n_constraints))
+    d_tensor[:, :, 0] = S_parent
+    col_idx = 1
+    
+    if constrain_dipole:
+        C_mat[:, col_idx:col_idx+3] = V_pairs
+        for x in range(3): d_tensor[:, :, col_idx+x] = mu_parent[x]
+        col_idx += 3
+        
+    if constrain_quad:
+        for q, (i, j, f, w) in enumerate(quad_map):
+            C_mat[:, col_idx+q] = V_quad_pairs[:, q]
+            d_tensor[:, :, col_idx+q] = rr_parent[f]
+
+    if reg > 0.0:
+        A_mat += reg * np.eye(M_pairs)
+        
+    if reg_dip > 0.0:
+        for I, pI in enumerate(fitted_pairs):
+            if pI['L'] == 1:
+                A_mat[I, I] += reg_dip
+                
+    X_I_nm = solve_kkt_tensor_reshaped(A_mat, b_tensor, C_mat, d_tensor)
+
+    # =========================================================================
+    # FAST Vectorized Output Tensor Generation
+    # =========================================================================
+    Q_A = np.zeros((mol.natm, Np, Np))
+    mu_A = np.zeros((mol.natm, 3, Np, Np))
+
+    for A in range(mol.natm):
+        I_mask = (atom_idx_vec == A)
+        if not np.any(I_mask): continue
+            
+        X_A = X_I_nm[I_mask]           
+        C_A = C_mat[I_mask, 0]         
+        
+        Q_A[A] = -np.einsum('Iij,I->ij', X_A, C_A, optimize=True)
+        mu_A[A] = np.einsum('Iij,Ix->xij', X_A, mu_vec_sums[I_mask], optimize=True)
+
+    if return_fit:
+        return Q_A, mu_A, A_mat_df, b_tensor_df, X_I_nm
+    return Q_A, mu_A    
+    
+getDMFitChargeOperatorSpherical = getDMFitChargeOperatorSphericalNew2
+getDMFitChargeOperatorDipoleSpherical = getDMFitChargeOperatorDipoleSphericalNew2
 
 '''
 This module contains stand alone implementations of the multipole operators.
@@ -253,7 +2117,7 @@ def getESPFGrid(mol,n_ang,n_rad,rad_method="vdw",ang_method="lebedev",rad_scal=1
     elif rad_method == "vdw2":
         # vdw radii of the atoms this version is closer to the CHELP/Merz-Kollman style of grid
         r_vdw = radii.VDW[Z]
-        r_grid = np.hstack([np.array([1]),1.0+rad_scal * np.arange(1,n_rad+1)])
+        r_grid = np.hstack([np.array([1]),1.0+rad_scal * np.arange(1,n_rad)])
         grid_rad = r_vdw.reshape((N_atm,1)) * r_grid.reshape((1,n_rad))
     else:
         raise Exception("Radial grid method ",rad_method," not recognised.")
@@ -1179,6 +3043,35 @@ class QMMultipole:
         # espf regularisation
         self.espf_reg_type = None
         self.espf_reg_param = 0.0
+        
+        # density fitting charge parameters
+        if self.multipole_order == 0:
+            self.df_min_basis = setup_default_min_basis()
+            self.df_reg = 1.0e-12
+            self.df_reg_r2 = 0.0
+            self.df_reg_S = 0.0 
+            self.df_w_df = 1.0 
+            self.df_w_mu = 1.0
+            self.df_w_ovlp = 1.0
+            self.df_w_quad = 0.0
+            self.df_aux_basis = 'weigend-jfit'
+            self.df_constrain_dip = False
+            self.df_constrain_quad = False
+            self.df_reg_dip = 0.0
+        else:
+            self.df_min_basis = setup_default_min_basis(add_pol=True)
+            self.df_reg = 1.0e-12
+            self.df_reg_r2 = 0.0
+            self.df_reg_S = 0.0 
+            self.df_w_df = 1.0 
+            self.df_w_mu = 0.0
+            self.df_w_ovlp = 1.0
+            self.df_w_quad = 1.0e-1
+            self.df_aux_basis = 'weigend-jfit'
+            self.df_constrain_dip = True
+            self.df_constrain_quad = False
+            self.df_reg_dip = 0.0
+            
         return
     
     def reset(self):
@@ -1194,14 +3087,16 @@ class QMMultipole:
         '''
         Generates the set of atom-centred multipole operators
         '''
-        
+        #t0 = timer()
         if self.multipole_method == "espf":
             self.getESPFMultipoleOperators(mol=mol)
         elif self.multipole_method == "mulliken":
             self.getMullikenMultipoleOperators(mol=mol)
+        elif self.multipole_method == "df":
+            self.getDensityFittedMultipoleOperators(mol=mol)
         else:
             raise Exception("Error:",self.multipole_method,"is not a recognised multipole method.")
-        
+        #print("Charge operator time = ", timer()-t0)
         return self.Q
     
     def getGradMultipoleOperators(self,A):
@@ -1261,6 +3156,40 @@ class QMMultipole:
         self.espf_fit_vars = fit_vars
         self.Q = Q 
         return 
+    
+    def getDensityFittedMultipoleOperators(self,mol=None):
+        '''
+        Generates the Minimal basis density fitted charges
+        '''
+        if mol is None:
+            mol = self.mol
+
+        
+        if self.multipole_order == 0 :
+            
+            self.Q = getDMFitChargeOperatorSpherical(mol, min_basis=self.df_min_basis, reg=self.df_reg, reg_r2=self.df_reg_r2,
+                                                     reg_S=self.df_reg_S, w_df=self.df_w_df, w_mu=self.df_w_mu, 
+                                                     w_ovlp=self.df_w_ovlp, w_quad=self.df_w_quad, aux_basis=self.df_aux_basis, 
+                                                    return_fit=False, constrain_dipole=self.df_constrain_dip, 
+                                                     constrain_quad=self.df_constrain_quad)
+            #if self.multipole_order > 0 :
+            #    N = self.Q.shape[0]
+            #    nao = self.Q.shape[1]
+            #    self.Q = np.concatenate((self.Q,np.zeros([3*N,nao,nao])),axis=0)
+            
+        elif self.multipole_order == 1 :
+            
+            Q,mu = getDMFitChargeOperatorDipoleSpherical(mol, min_basis=self.df_min_basis, reg=self.df_reg, reg_r2=self.df_reg_r2,
+                                                     reg_S=self.df_reg_S, w_df=self.df_w_df, w_mu=self.df_w_mu, 
+                                                     w_ovlp=self.df_w_ovlp, w_quad=self.df_w_quad, aux_basis=self.df_aux_basis, 
+                                                    return_fit=False, constrain_dipole=self.df_constrain_dip, 
+                                                     constrain_quad=self.df_constrain_quad, reg_dip=self.df_reg_dip)
+            self.Q = np.concatenate((Q,mu.swapaxes(0, 1).reshape(-1, mu.shape[2], mu.shape[3])),axis=0)
+            
+        else:
+            print("Error! Only charges and dipoles implemented.")
+        
+        return
     
     def evaluateMultipoleIntegrals(self,mol=None):
     
