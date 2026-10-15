@@ -17,30 +17,116 @@ except ImportError:
     np.einsum = np.einsum
 
 
+CG_L1 = {
+    (0, 1): {
+        0: [(0, 0, 1.0)],
+        1: [(0, 1, 1.0)],
+        2: [(0, 2, 1.0)]
+    },
+    (1, 0): {
+        0: [(0, 0, 1.0)],
+        1: [(1, 0, 1.0)],
+        2: [(2, 0, 1.0)]
+    },
+    (1, 2): {
+        0: [(0, 2,  0.31622776601683794), (0, 4,  0.5477225575051661), 
+            (1, 1, -0.5477225575051661), (2, 0, -0.5477225575051661)],
+        1: [(0, 1, -0.5477225575051661), (1, 2, -0.6324555320336759), 
+            (2, 3, -0.5477225575051661)],
+        2: [(0, 0, -0.5477225575051661), (1, 3, -0.5477225575051661), 
+            (2, 2,  0.31622776601683794), (2, 4, -0.5477225575051661)]
+    },
+    (2, 1): {
+        0: [(2, 0,  0.31622776601683794), (4, 0,  0.5477225575051661), 
+            (1, 1, -0.5477225575051661), (0, 2, -0.5477225575051661)],
+        1: [(1, 0, -0.5477225575051661), (2, 1, -0.6324555320336759), 
+            (3, 2, -0.5477225575051661)],
+        2: [(0, 0, -0.5477225575051661), (3, 1, -0.5477225575051661), 
+            (2, 2,  0.31622776601683794), (4, 2, -0.5477225575051661)]
+    }
+}
+
+valence_l_values = [
+    [0, 1],    # 0: H (Z=1) - include p for polarisation
+    [0, 1],    # 1: He (Z=2) - include p for polarisation
+    [0, 1],    # 2: Li (Z=3) - include p for polarisation
+    [0, 1],    # 3: Be (Z=4) - include p for polarisation
+    [0, 1],    # 4: B (Z=5)
+    [0, 1],    # 5: C (Z=6)
+    [0, 1],    # 6: N (Z=7)
+    [0, 1],    # 7: O (Z=8)
+    [0, 1],    # 8: F (Z=9)
+    [0, 1],    # 9: Ne (Z=10)
+    [0, 1],    # 10: Na (Z=11)
+    [0, 1],    # 11: Mg (Z=12)
+    [0, 1],    # 12: Al (Z=13)
+    [0, 1],    # 13: Si (Z=14)
+    [0, 1],    # 14: P (Z=15)
+    [0, 1],    # 15: S (Z=16)
+    [0, 1],    # 16: Cl (Z=17)
+    [0, 1],    # 17: Ar (Z=18)
+    [0, 1],    # 18: K (Z=19)
+    [0, 1],    # 19: Ca (Z=20)
+    [0, 1, 2], # 20: Sc (Z=21) - include 3d
+    [0, 1, 2], # 21: Ti (Z=22) - include 3d
+    [0, 1, 2], # 22: V (Z=23) - include 3d
+    [0, 1, 2], # 23: Cr (Z=24) - include 3d
+    [0, 1, 2], # 24: Mn (Z=25) - include 3d
+    [0, 1, 2], # 25: Fe (Z=26) - include 3d
+    [0, 1, 2], # 26: Co (Z=27) - include 3d
+    [0, 1, 2], # 27: Ni (Z=28) - include 3d
+    [0, 1, 2], # 28: Cu (Z=29) - include 3d
+    [0, 1, 2], # 29: Zn (Z=30) - include 3d
+    [0, 1],    # 30: Ga (Z=31) - treat 3d as core
+    [0, 1],    # 31: Ge (Z=32) - treat 3d as core
+    [0, 1],    # 32: As (Z=33) - treat 3d as core
+    [0, 1],    # 33: Se (Z=34) - treat 3d as core
+    [0, 1],    # 34: Br (Z=35) - treat 3d as core
+    [0, 1]     # 35: Kr (Z=36) - treat 3d as core
+]    
+
+quad_map = [
+        (0, 0, 0, 1.0), # xx
+        (0, 1, 1, 2.0), # xy (weight 2 for off-diagonal rotational invariance)
+        (0, 2, 2, 2.0), # xz
+        (1, 1, 4, 1.0), # yy
+        (1, 2, 5, 2.0), # yz
+        (2, 2, 8, 1.0)  # zz
+        ]   
 
 def setup_default_min_basis(add_pol=False):
     min_basis_ref = MODULE_DIR + "/data/scalmini.nw"
+    available_atoms = ['H','He','Li','Be','B','C','N','O','F','Ne','Na','Mg','Al','Si','P','S','Cl','Ar','K','Ca']
+    #print(available_atoms)
+    #min_basis_ref = 'sto-6g'
+    #min_basis_mod = {'default':'sto-3g'}
     min_basis_mod = {}
-    
     # 1. Eagerly construct the dictionary for elements up to Radon (Z=86)
+    
     for Z in range(1, 87):
         symb = elements.ELEMENTS[Z]
-        try:
-            # Try to load the primary basis
-            min_basis_mod[symb] = gto.basis.load(min_basis_ref, symb)
-        except (RuntimeError, KeyError):
+        if symb in available_atoms:
+            min_basis_mod[symb] = gto.basis.load(min_basis_ref,symb)
+        else:
             try:
-                # Fallback to sto-3g if the element is missing
-                min_basis_mod[symb] = gto.basis.load('sto-3g', symb)
-            except (RuntimeError, KeyError):
-                pass # Skip if the element is missing in both bases
+                min_basis_mod[symb] = gto.basis.load('sto-3g',symb)
+            except:
+                try:
+                    min_basis_mod[symb] = gto.basis.load('minao',symb)
+                except:
+                    pass
 
     # 2. Append polarization functions if requested
     if add_pol:
         if 'H' in min_basis_mod:
-            min_basis_mod['H'] = min_basis_mod['H'] + [[1, [0.727, 1]]]
+            #min_basis_mod['H'] = min_basis_mod['H'] + [[1, [0.727, 1]]]
+            min_basis_mod['H'] = min_basis_mod['H'] + [[1, [1.1, 1]]]
+            #min_basis_mod['H'] = gto.basis.load('6-31G','H') + [[1, [1.1, 1]]]
+            
         if 'He' in min_basis_mod:
-            min_basis_mod['He'] = min_basis_mod['He'] + [[1, [1.275, 1.0]]]
+            min_basis_mod['He'] = min_basis_mod['He'] + [[1, [1.45, 1.0]]]
+    
+    #min_basis_mod = 'pcseg-1'
 
     return min_basis_mod
     
@@ -571,8 +657,9 @@ def getDMFitChargeOperatorSphericalNew2(mol, min_basis='minao', reg=1e-12, reg_r
                         'min_ao_a': a_idx_global,
                         'min_ao_b': b_idx_global
                     })
-
+    
     M_pairs = len(spherical_pairs)
+    #print("Number of spherical density basis functions:" , M_pairs)
 
     # Pre-compute Global Contributions
     V_pairs = np.zeros((M_pairs, 3))
@@ -600,6 +687,8 @@ def getDMFitChargeOperatorSphericalNew2(mol, min_basis='minao', reg=1e-12, reg_r
             sum_r2 = np.sum(r2_min_global[a_g, b_g])
             r2_shifted_pair_vals[I] = sum_r2 - 2.0 * np.dot(R_A, sum_r) + np.dot(R_A, R_A) * sum_S
             
+    
+        
     # =========================================================================
     # Build Auxiliary Basis Metric (L2 Overlap)
     # =========================================================================
@@ -614,6 +703,23 @@ def getDMFitChargeOperatorSphericalNew2(mol, min_basis='minao', reg=1e-12, reg_r
         ovlp3c_min_aux = (min_mol + auxmol).intor('int3c1e', shls_slice=(0, nshl_min, 0, nshl_min, nshl_min, nshl_min + nshl_aux))
         ovlp3c_I = np.array([np.sum(ovlp3c_min_aux[pI['min_ao_a'], pI['min_ao_b'], :], axis=0) for pI in spherical_pairs])
         ovlp3c_I_proj = ovlp3c_I @ S_aux_inv
+        
+        #auxmol = df.make_auxmol(mol, 'aug-cc-pV5Z-jkfit')
+        #N_aux_2, nshl_aux_2 = auxmol.nao, auxmol.nbas
+        #
+        #S_aux_inv_2 = np.linalg.pinv(auxmol.intor('int1e_ovlp'), rcond=1e-8)
+        #mol_parent_aux = mol + auxmol
+        #ovlp3c_parent_2 = mol_parent_aux.intor('int3c1e', shls_slice=(0, nshl_parent, 0, nshl_parent, nshl_parent, nshl_parent + nshl_aux_2))
+        #
+        #ovlp3c_min_aux_2 = (min_mol + auxmol).intor('int3c1e', shls_slice=(0, nshl_min, 0, nshl_min, nshl_min, nshl_min + nshl_aux_2))
+        #ovlp3c_I_2 = np.array([np.sum(ovlp3c_min_aux_2[pI['min_ao_a'], pI['min_ao_b'], :], axis=0) for pI in spherical_pairs])
+        #ovlp3c_I_proj_2 = ovlp3c_I_2 @ S_aux_inv_2
+        #print(np.max(np.abs(ovlp3c_I_proj @ ovlp3c_I.T)),
+        #      np.max(np.abs((ovlp3c_parent.reshape(-1, N_aux) @ ovlp3c_I_proj.T).reshape(Np, Np, M_pairs))))
+        #print(np.max(np.abs(ovlp3c_I_proj @ ovlp3c_I.T- ovlp3c_I_proj_2 @ ovlp3c_I_2.T)))
+        #print(np.max(np.abs((ovlp3c_parent.reshape(-1, N_aux) @ ovlp3c_I_proj.T).reshape(Np, Np, M_pairs) - 
+        #                   (ovlp3c_parent_2.reshape(-1, N_aux_2) @ ovlp3c_I_proj_2.T).reshape(Np, Np, M_pairs))))
+        
 
     # =========================================================================
     # Build Vectorized KKT Matrices (Optimized Atom-Block ERI Processing)
@@ -691,6 +797,7 @@ def getDMFitChargeOperatorSphericalNew2(mol, min_basis='minao', reg=1e-12, reg_r
                 if A_idx == pJ['atom']:
                     sum_r2_J = r2_shifted_pair_vals[J]
                     A_mat[I, J] += (reg_r2/(R_vdw[A_idx]**4)) * sum_r2_I * sum_r2_J
+                    
 
     if w_ovlp > 0.0 and aux_basis is not None:
         A_mat += w_ovlp * (ovlp3c_I_proj @ ovlp3c_I.T)
@@ -726,74 +833,818 @@ def getDMFitChargeOperatorSphericalNew2(mol, min_basis='minao', reg=1e-12, reg_r
         return Q_A, A_mat_df, b_tensor_df, X_I_nm
     return Q_A
 
+def calculate_N_CGTO(alphas, coeffs):
+    """
+    Calculates the overall L2 normalization constant for an s-type 
+    contracted Gaussian function.
+    
+    Args:
+        alphas (array-like): The primitive exponents (alpha_i).
+        coeffs (array-like): The contraction coefficients (d_i).
+        
+    Returns:
+        S (float): The squared L2 norm of the provided contracted function.
+        N_CGTO (float): The scaling factor required to L2-normalize it.
+    """
+    alphas = np.array(alphas)
+    coeffs = np.array(coeffs)
+    
+    # Create 2D grids for i (rows) and j (columns) using broadcasting
+    alpha_i = alphas[:, np.newaxis]
+    alpha_j = alphas[np.newaxis, :]
+    
+    d_i = coeffs[:, np.newaxis]
+    d_j = coeffs[np.newaxis, :]
+    
+    # Calculate the exact analytical overlap integral for each primitive pair
+    # Formula: d_i * d_j * [ (4 * alpha_i * alpha_j) / (alpha_i + alpha_j)^2 ]^(3/4)
+    overlap_matrix = d_i * d_j * ( (4.0 * alpha_i * alpha_j) / (alpha_i + alpha_j)**2 )**0.75
+    
+    # Sum all elements to get the total squared norm of the contracted function
+    S = np.sum(overlap_matrix)
+    
+    # The required overall normalization factor is 1 / sqrt(S)
+    N_CGTO = 1.0 / np.sqrt(S)
+    
+    return S, N_CGTO
 
-CG_L1 = {
-    (0, 1): {
-        0: [(0, 0, 1.0)],
-        1: [(0, 1, 1.0)],
-        2: [(0, 2, 1.0)]
-    },
-    (1, 0): {
-        0: [(0, 0, 1.0)],
-        1: [(1, 0, 1.0)],
-        2: [(2, 0, 1.0)]
-    },
-    (1, 2): {
-        0: [(0, 2,  0.31622776601683794), (0, 4,  0.5477225575051661), 
-            (1, 1, -0.5477225575051661), (2, 0, -0.5477225575051661)],
-        1: [(0, 1, -0.5477225575051661), (1, 2, -0.6324555320336759), 
-            (2, 3, -0.5477225575051661)],
-        2: [(0, 0, -0.5477225575051661), (1, 3, -0.5477225575051661), 
-            (2, 2,  0.31622776601683794), (2, 4, -0.5477225575051661)]
-    },
-    (2, 1): {
-        0: [(2, 0,  0.31622776601683794), (4, 0,  0.5477225575051661), 
-            (1, 1, -0.5477225575051661), (0, 2, -0.5477225575051661)],
-        1: [(1, 0, -0.5477225575051661), (2, 1, -0.6324555320336759), 
-            (3, 2, -0.5477225575051661)],
-        2: [(0, 0, -0.5477225575051661), (3, 1, -0.5477225575051661), 
-            (2, 2,  0.31622776601683794), (4, 2, -0.5477225575051661)]
-    }
-}
 
-valence_l_values = [
-    [0, 1],    # 0: H (Z=1) - include p for polarisation
-    [0, 1],    # 1: He (Z=2) - include p for polarisation
-    [0, 1],    # 2: Li (Z=3) - include p for polarisation
-    [0, 1],    # 3: Be (Z=4) - include p for polarisation
-    [0, 1],    # 4: B (Z=5)
-    [0, 1],    # 5: C (Z=6)
-    [0, 1],    # 6: N (Z=7)
-    [0, 1],    # 7: O (Z=8)
-    [0, 1],    # 8: F (Z=9)
-    [0, 1],    # 9: Ne (Z=10)
-    [0, 1],    # 10: Na (Z=11)
-    [0, 1],    # 11: Mg (Z=12)
-    [0, 1],    # 12: Al (Z=13)
-    [0, 1],    # 13: Si (Z=14)
-    [0, 1],    # 14: P (Z=15)
-    [0, 1],    # 15: S (Z=16)
-    [0, 1],    # 16: Cl (Z=17)
-    [0, 1],    # 17: Ar (Z=18)
-    [0, 1],    # 18: K (Z=19)
-    [0, 1],    # 19: Ca (Z=20)
-    [0, 1, 2], # 20: Sc (Z=21) - include 3d
-    [0, 1, 2], # 21: Ti (Z=22) - include 3d
-    [0, 1, 2], # 22: V (Z=23) - include 3d
-    [0, 1, 2], # 23: Cr (Z=24) - include 3d
-    [0, 1, 2], # 24: Mn (Z=25) - include 3d
-    [0, 1, 2], # 25: Fe (Z=26) - include 3d
-    [0, 1, 2], # 26: Co (Z=27) - include 3d
-    [0, 1, 2], # 27: Ni (Z=28) - include 3d
-    [0, 1, 2], # 28: Cu (Z=29) - include 3d
-    [0, 1, 2], # 29: Zn (Z=30) - include 3d
-    [0, 1],    # 30: Ga (Z=31) - treat 3d as core
-    [0, 1],    # 31: Ge (Z=32) - treat 3d as core
-    [0, 1],    # 32: As (Z=33) - treat 3d as core
-    [0, 1],    # 33: Se (Z=34) - treat 3d as core
-    [0, 1],    # 34: Br (Z=35) - treat 3d as core
-    [0, 1]     # 35: Kr (Z=36) - treat 3d as core
-]
+def calculate_L1_scaling_factor(alphas, coeffs):
+    """
+    Calculates the L1 normalization scaling factor (C_n) for an s-type 
+    contracted Gaussian function, assuming it is already L2 normalized (N_CGTO = 1).
+    
+    Args:
+        alphas (array-like): The primitive exponents (alpha_i).
+        coeffs (array-like): The contraction coefficients (d_i).
+        
+    Returns:
+        C_n (float): The scaling factor required to L1-normalize the function 
+                     (so its spatial integral equals 1.0).
+    """
+    alphas = np.array(alphas)
+    coeffs = np.array(coeffs)
+    
+    # Calculate the spatial volume integral for each L2-normalized primitive
+    primitive_integrals = coeffs * (2.0 * np.pi / alphas)**0.75
+    
+    # Sum them to get the total spatial integral of the contracted function
+    total_integral = np.sum(primitive_integrals)
+    
+    # get current normalisation constant
+    #S,N_CGTO = calculate_N_CGTO(alphas, coeffs)
+    #C_n = 1.0 / (total_integral*N_CGTO)
+    
+    # The L1 scaling factor is the inverse of the total volume integral
+    C_n = 1.0 / (total_integral)
+    
+    return C_n
+
+def calculate_dipole_scaling_factor_P(alphas, coeffs):
+    """
+    Calculates the scaling factor required to unit-dipole normalize a p-type 
+    contracted Gaussian function, assuming it is already L2 normalized (N_CGTO = 1).
+    
+    Args:
+        alphas (array-like): The primitive exponents (alpha_i).
+        coeffs (array-like): The contraction coefficients (d_i).
+        
+    Returns:
+        C_mu (float): The scaling factor required to normalize the function 
+                      so its dipole integral evaluates to exactly 1.0.
+    """
+    alphas = np.array(alphas)
+    coeffs = np.array(coeffs)
+    
+    # Calculate the exact dipole integral for each L2-normalized p-type primitive
+    primitive_dipoles = coeffs * (8.0 * np.pi**3 / alphas**5)**0.25
+    
+    # Sum them to get the total dipole moment of the contracted function
+    total_dipole = np.sum(primitive_dipoles)
+    
+    # The required scaling factor is the inverse of the total dipole
+    C_mu = 1.0 / total_dipole
+    
+    return C_mu
+
+def calculate_N_CGTO_P(alphas, coeffs):
+    """
+    Calculates the overall L2 normalization constant for a p-type 
+    contracted Gaussian function.
+    
+    Args:
+        alphas (array-like): The primitive exponents (alpha_i).
+        coeffs (array-like): The contraction coefficients (d_i).
+        
+    Returns:
+        S (float): The squared L2 norm of the provided contracted function.
+        N_CGTO (float): The scaling factor required to L2-normalize it.
+    """
+    alphas = np.array(alphas)
+    coeffs = np.array(coeffs)
+    
+    # Create 2D grids for i (rows) and j (columns) using broadcasting
+    alpha_i = alphas[:, np.newaxis]
+    alpha_j = alphas[np.newaxis, :]
+    
+    d_i = coeffs[:, np.newaxis]
+    d_j = coeffs[np.newaxis, :]
+    
+    # Calculate the exact analytical overlap integral for p-type primitive pairs
+    # Note the exponent is 1.25 (5/4) instead of 0.75 (3/4)
+    overlap_matrix = d_i * d_j * ( (4.0 * alpha_i * alpha_j) / (alpha_i + alpha_j)**2 )**1.25
+    
+    # Sum all elements to get the total squared norm of the contracted function
+    S = np.sum(overlap_matrix)
+    
+    # The required overall normalization factor is 1 / sqrt(S)
+    N_CGTO = 1.0 / np.sqrt(S)
+    
+    return S, N_CGTO
+
+def getDMFitChargeOperatorSphericalAuxOld(mol, aux_basis_min, reg=1e-12, reg_r2=0.0, reg_S=0.0, reg_tik_r2=0.0, reg_inter=0.0,
+                                          w_df=1.0, w_mu=0.0, w_ovlp=0.0, w_quad=0.0, w_esp = 0.0,
+                                          return_fit=False, constrain_dipole=False, 
+                                          constrain_quad=False, esp_grid_data=None ):
+    # Build auxiliary basis explicitly
+    auxmol = gto.Mole()
+    auxmol.atom = mol.atom 
+    auxmol.unit = mol.unit
+    auxmol.basis = aux_basis_min
+    auxmol.charge = np.sum(mol.atom_charges())
+    #auxmol.build(dump_input=False, parse_arg=False)
+    auxmol.build(dump_input=False)
+    
+    Np = mol.nao
+    M_aux = auxmol.nao
+    
+    # =========================================================================
+    # 1. Parent Integrals for Penalties & Constraints
+    # =========================================================================
+    S_parent = mol.intor('int1e_ovlp')
+    r_parent = mol.intor('int1e_r') 
+    rr_parent = mol.intor('int1e_rr')
+
+    # =========================================================================
+    # 2. Extract Scaling Factors to convert PySCF L2 to L1 (\eta_P = c_P * P)
+    # =========================================================================
+    c_P = np.zeros(M_aux)
+    r2_aux = np.zeros(M_aux) 
+    
+    for i in range(auxmol.nbas):
+        if auxmol.bas_angular(i) != 0:
+            raise ValueError("This formulation requires purely S-type auxiliary functions.")
+            
+        alphas = auxmol.bas_exp(i)
+        nctr = auxmol._bas[i, gto.NCTR_OF]
+        
+        coeffs = auxmol.bas_ctr_coeff(i)
+        for c in range(nctr):
+            ao_idx = auxmol.ao_loc_nr()[i] + c
+            d_i = coeffs[:, c]
+            c_P[ao_idx] = calculate_L1_scaling_factor(alphas,d_i)
+            
+            # 2. Calculate the r^2 integral for the L2-normalized contracted function
+            # The spatial integral of r^2 for a single L2-normalized primitive is:
+            # (1.5 / alpha) * (2*pi / alpha)^0.75
+            r2_primitive_integrals = d_i * (1.5 / alphas) * (2.0 * np.pi / alphas)**0.75
+            r2_total_L2 = np.sum(r2_primitive_integrals)
+            
+            # 3. Apply the L1 scaling to get the final r2_aux variance
+            r2_aux[ao_idx] = c_P[ao_idx] * r2_total_L2
+
+    # =========================================================================
+    # 3. Geometric Properties of \eta_P
+    # =========================================================================
+    V_aux = np.zeros((M_aux, 3))
+    quad_map = [
+        (0, 0, 0, 1.0), # xx
+        (0, 1, 1, 2.0), # xy (weight 2 for off-diagonal rotational invariance)
+        (0, 2, 2, 2.0), # xz
+        (1, 1, 4, 1.0), # yy
+        (1, 2, 5, 2.0), # yz
+        (2, 2, 8, 1.0)  # zz
+        ]
+    V_quad_aux = np.zeros((M_aux, 6)) if quad_map is not None else None
+    
+    for A in range(auxmol.natm):
+        shl0, shl1, ao0, ao1 = auxmol.aoslice_by_atom()[A]
+        R_A = auxmol.atom_coord(A)
+        
+        for P in range(ao0, ao1):
+            V_aux[P] = R_A
+            if quad_map is not None:
+                Q_tensor = np.outer(R_A, R_A) + (r2_aux[P] / 3.0) * np.eye(3)
+                for q, (i, j, f, w) in enumerate(quad_map):
+                    V_quad_aux[P, q] = Q_tensor[i, j]
+
+    
+        
+    # =========================================================================
+    # 4. Construct Density Fitting Arrays (Applying c_P scaling)
+    # =========================================================================
+    # Coulomb Metric (w_df)
+    int3c_L2 = df.incore.aux_e2(mol, auxmol, intor='int3c2e', aosym='s1', comp=1) # (Np, Np, M_aux)
+    int2c_L2 = auxmol.intor('int2c2e', aosym='s1', comp=1)                        # (M_aux, M_aux)
+
+    b_tensor_df = int3c_L2 * c_P[None,None,:] 
+    A_mat_df = np.einsum('p,q,pq->pq', c_P, c_P, int2c_L2)
+
+    # Base arrays scaled by Coulomb DF weight
+    b_tensor = w_df * b_tensor_df.copy()
+    A_mat = w_df * A_mat_df.copy()
+
+    # Overlap Metric (w_ovlp) directly using the fitting basis
+    if w_ovlp > 0.0:
+        ovlp3c_L2 = df.incore.aux_e2(mol, auxmol, intor='int3c1e') 
+        ovlp2c_L2 = auxmol.intor('int1e_ovlp')
+        
+        ovlp3c_L1 = ovlp3c_L2 * c_P[None,None,:]
+        ovlp2c_L1 = np.einsum('p,q,pq->pq', c_P, c_P, ovlp2c_L2)
+        
+        b_tensor += w_ovlp * ovlp3c_L1
+        A_mat += w_ovlp * ovlp2c_L1
+        
+    
+
+    # =========================================================================
+    # 5. Populate Constraints (C_mat, d_tensor)
+    # =========================================================================
+    n_constraints = 1 + (3 if constrain_dipole else 0) + (6 if constrain_quad else 0)
+    C_mat = np.zeros((M_aux, n_constraints))
+    d_tensor = np.zeros((Np, Np, n_constraints))
+    
+    # 5a. Global Charge Constraint (\int \eta_P dr == 1.0 identically)
+    C_mat[:, 0] = 1.0
+    d_tensor[:, :, 0] = S_parent
+    col_idx = 1
+    
+    # 5b. Dipole Constraints
+    if constrain_dipole:
+        C_mat[:, col_idx:col_idx+3] = V_aux
+        for x in range(3):
+            d_tensor[:, :, col_idx+x] = r_parent[x]
+        col_idx += 3
+        
+    # 5c. Quadrupole Constraints
+    if constrain_quad and quad_map is not None:
+        for q, (i, j, f, w) in enumerate(quad_map):
+            C_mat[:, col_idx+q] = V_quad_aux[:, q]
+            d_tensor[:, :, col_idx+q] = rr_parent[f]
+
+    # =========================================================================
+    # 6. Apply Penalties / Regularization
+    # =========================================================================
+    if reg > 0.0:
+        A_mat += reg * np.eye(M_aux)
+
+    if reg_S > 0.0:
+        b_tensor += reg_S * np.einsum('p,jk->jkp', C_mat[:, 0], S_parent)
+        A_mat += reg_S * np.outer(C_mat[:, 0], C_mat[:, 0])
+        
+    if w_mu > 0.0:
+        #for x in range(3):
+        #    b_tensor += w_mu * np.einsum('p,jk->jkp', V_aux[:, x], r_parent[x])
+        b_tensor += w_mu * np.einsum('px,xjk->jkp', V_aux, r_parent)
+        A_mat += w_mu * (V_aux @ V_aux.T)
+        
+    if w_quad > 0.0 and quad_map is not None:
+        W_vec = np.array([w for (_, _, _, w) in quad_map])
+        for q, (i, j, f, w) in enumerate(quad_map):
+            b_tensor += w_quad * w * np.einsum('p,jk->jkp', V_quad_aux[:, q], rr_parent[f])
+        A_mat += w_quad * (V_quad_aux * W_vec) @ V_quad_aux.T
+        
+    if w_esp > 0 :
+        grid_coords, grid_w = esp_grid_data
+        grid_w = grid_w / np.sum(grid_w)
+        R = mol.atom_coords()
+        D = getESPMatrix(grid_coords,R,0)
+        w_D = grid_w[:,None] * D
+        #print(grid_coords.shape, grid_w.shape, D.shape, w_D.shape)
+        A_esp = w_esp * (D.T).dot( w_D )
+        # get the ESP potential operators at grid points
+        block_size = 16
+        esp = getESPMat(mol,grid_coords,block_size) 
+        b_esp = -np.einsum('ka,knm->anm',w_D,esp,optimize=True)
+        #print(b_tensor.shape)
+        for A in range(auxmol.natm):
+            shl0, shl1, ao0, ao1 = auxmol.aoslice_by_atom()[A]
+            b_tensor[:,:,ao0:ao1] += w_esp * b_esp[A, :, :, None]
+            for B in range(auxmol.natm):
+                shl0, shl1, ao0B, ao1B = auxmol.aoslice_by_atom()[B]
+                A_mat[ao0:ao1,ao0B:ao1B] += w_esp * A_esp[A,B]
+        
+    if reg_r2 > 0.0:
+        # Penalize variance locally inside atom blocks (scaled by VDW volume)
+        R_vdw = radii.VDW[mol.atom_charges()]
+        for A in range(auxmol.natm):
+            shl0, shl1, ao0, ao1 = auxmol.aoslice_by_atom()[A]
+            
+            # Extract slice for atom A
+            r2_slice = r2_aux[ao0:ao1]
+            
+            # Add to A_mat block 
+            A_mat[ao0:ao1, ao0:ao1] += (reg_r2 / (R_vdw[A]**4)) * np.outer(r2_slice, r2_slice)
+
+    if reg_tik_r2 > 0.0:
+        # Base Integrals for Tikhonov Regularization (Apply c_P scaling)
+        # Calculate global integrals in the L2-normalized auxiliary basis
+        S_aux_L2 = auxmol.intor('int1e_ovlp')
+        r_aux_L2 = auxmol.intor('int1e_r')   # Shape: (3, M_aux, M_aux)
+        r2_aux_L2 = auxmol.intor('int1e_r2') # Shape: (M_aux, M_aux)
+
+        # Scale to L1-normalized basis using your c_P array
+        S_aux_L1 = np.einsum('p,q,pq->pq', c_P, c_P, S_aux_L2)
+        r_aux_L1 = np.einsum('p,q,xpq->xpq', c_P, c_P, r_aux_L2)
+        r2_aux_L1 = np.einsum('p,q,pq->pq', c_P, c_P, r2_aux_L2)
+        for A in range(auxmol.natm):
+            shl0, shl1, ao0, ao1 = auxmol.aoslice_by_atom()[A]
+            R_A = auxmol.atom_coord(A)
+            R_A_sq = np.dot(R_A, R_A)
+            
+            # Extract integral slices for the current atom's block
+            S_block = S_aux_L1[ao0:ao1, ao0:ao1]
+            r_block = r_aux_L1[:, ao0:ao1, ao0:ao1]
+            r2_block = r2_aux_L1[ao0:ao1, ao0:ao1]
+            
+            # Shift the operator to atom A's center
+            local_r2_matrix = (r2_block 
+                               - 2.0 * np.einsum('x,xpq->pq', R_A, r_block) 
+                               + R_A_sq * S_block)
+            
+            # Add directly to the diagonal block of A_mat
+            A_mat[ao0:ao1, ao0:ao1] += reg_tik_r2 * local_r2_matrix
+    
+    
+    
+    if reg_inter > 0.0:
+        # 1. Start with the fully c_P-scaled Coulomb metric
+        A_inter = A_mat_df.copy()
+        
+        # 2. Zero out the intra-atomic (diagonal) blocks
+        for A in range(auxmol.natm):
+            shl0, shl1, ao0, ao1 = auxmol.aoslice_by_atom()[A]
+            A_inter[ao0:ao1, ao0:ao1] = 0.0
+            
+        # 3. Add to the main fitting matrix
+        A_mat += reg_inter * A_inter
+            
+    # =========================================================================
+    # 7. Solve System & Extract Charge Operators
+    # =========================================================================
+    X_P_nm = solve_kkt_tensor_reshaped(A_mat, b_tensor, C_mat, d_tensor)
+    Q_A = np.zeros((mol.natm, Np, Np))
+
+    for A in range(auxmol.natm):
+        shl0, shl1, ao0, ao1 = auxmol.aoslice_by_atom()[A]
+        # Sum down the resolved M_aux dimension into atoms.
+        Q_A[A] -= np.sum(X_P_nm[ao0:ao1, :, :], axis=0)
+
+    if return_fit:
+        return Q_A, A_mat_df, b_tensor_df, X_P_nm
+        
+    return Q_A
+
+
+
+
+
+
+
+
+def getDMFitChargeOperatorSphericalAuxNew(mol, aux_basis_min, reg=1e-12, reg_r2=0.0, reg_S=0.0, 
+                                       w_df=1.0, w_mu=0.0, w_ovlp=0.0, w_quad=0.0, 
+                                       return_fit=False, constrain_dipole=False, 
+                                       constrain_quad=False, quad_map=None):
+    # Build auxiliary basis explicitly
+    auxmol = gto.Mole()
+    auxmol.atom = mol.atom 
+    auxmol.basis = aux_basis_min
+    auxmol.charge = np.sum(mol.atom_charges())
+    auxmol.build(dump_input=False)
+    
+    Np = mol.nao
+    M_aux = auxmol.nao
+    
+    # =========================================================================
+    # 1. Parent Integrals for Penalties & Constraints
+    # =========================================================================
+    S_parent = mol.intor('int1e_ovlp')
+    r_parent = mol.intor('int1e_r') 
+    rr_parent = mol.intor('int1e_rr')
+
+    # =========================================================================
+    # 2. Extract L1 Integrals (c_P) and r^2 Integrals for L2 functions
+    # =========================================================================
+    c_P = np.zeros(M_aux)
+    r2_L2 = np.zeros(M_aux) 
+    
+    for i in range(auxmol.nbas):
+        if auxmol.bas_angular(i) != 0:
+            raise ValueError("This formulation requires purely S-type auxiliary functions.")
+            
+        alphas = auxmol.bas_exp(i)
+        nctr = auxmol._bas[i, gto.NCTR_OF]
+        
+        coeffs = auxmol.bas_ctr_coeff(i)
+        for c in range(nctr):
+            ao_idx = auxmol.ao_loc_nr()[i] + c
+            d_i = coeffs[:, c]
+            
+            # The volume integral of the L2-normalized function
+            c_P[ao_idx] = calculate_L1_scaling_factor(alphas, d_i)
+            
+            # The spatial integral of r^2 for a single L2-normalized primitive is:
+            # (1.5 / alpha) * (2*pi / alpha)^0.75
+            r2_primitive_integrals = d_i * (1.5 / alphas) * (2.0 * np.pi / alphas)**0.75
+            
+            # This is the exact r^2 integral of the L2-normalized contracted function
+            r2_L2[ao_idx] = np.sum(r2_primitive_integrals)
+
+    # =========================================================================
+    # 3. Geometric Properties of L2-Normalized Functions
+    # =========================================================================
+    V_aux = np.zeros((M_aux, 3))
+    V_quad_aux = np.zeros((M_aux, 6)) if quad_map is not None else None
+    
+    for A in range(auxmol.natm):
+        shl0, shl1, ao0, ao1 = auxmol.aoslice_by_atom()[A]
+        R_A = auxmol.atom_coord(A)
+        
+        for P in range(ao0, ao1):
+            # Dipole integral: \int r P_{L2} dr = c_P * R_A
+            V_aux[P] = c_P[P] * R_A
+            
+            if quad_map is not None:
+                # Quadrupole integral: \int r r^T P_{L2} dr
+                Q_tensor = c_P[P] * np.outer(R_A, R_A) + (r2_L2[P] / 3.0) * np.eye(3)
+                for q, (i, j, f, w) in enumerate(quad_map):
+                    V_quad_aux[P, q] = Q_tensor[i, j]
+
+    # =========================================================================
+    # 4. Construct Density Fitting Arrays (Pure L2 Metric)
+    # =========================================================================
+    # Coulomb Metric (w_df)
+    int3c_L2 = df.incore.aux_e2(mol, auxmol, intor='int3c2e', aosym='s1', comp=1)
+    int2c_L2 = auxmol.intor('int2c2e', aosym='s1', comp=1)                        
+
+    # Directly use L2 matrices without c_P scaling
+    b_tensor_df = int3c_L2.copy() 
+    A_mat_df = int2c_L2.copy()
+
+    b_tensor = w_df * b_tensor_df.copy()
+    A_mat = w_df * A_mat_df.copy()
+
+    # Overlap Metric (w_ovlp) 
+    if w_ovlp > 0.0:
+        ovlp3c_L2 = df.incore.aux_e2(mol, auxmol, intor='int3c1e') 
+        ovlp2c_L2 = auxmol.intor('int1e_ovlp')
+        
+        b_tensor += w_ovlp * ovlp3c_L2
+        A_mat += w_ovlp * ovlp2c_L2
+
+    # =========================================================================
+    # 5. Populate Constraints (C_mat, d_tensor)
+    # =========================================================================
+    n_constraints = 1 + (3 if constrain_dipole else 0) + (6 if constrain_quad else 0)
+    C_mat = np.zeros((M_aux, n_constraints))
+    d_tensor = np.zeros((Np, Np, n_constraints))
+    
+    # 5a. Global Charge Constraint (\int P_{L2} dr == c_P)
+    C_mat[:, 0] = c_P
+    d_tensor[:, :, 0] = S_parent
+    col_idx = 1
+    
+    # 5b. Dipole Constraints
+    if constrain_dipole:
+        C_mat[:, col_idx:col_idx+3] = V_aux
+        for x in range(3):
+            d_tensor[:, :, col_idx+x] = r_parent[x]
+        col_idx += 3
+        
+    # 5c. Quadrupole Constraints
+    if constrain_quad and quad_map is not None:
+        for q, (i, j, f, w) in enumerate(quad_map):
+            C_mat[:, col_idx+q] = V_quad_aux[:, q]
+            d_tensor[:, :, col_idx+q] = rr_parent[f]
+
+    # =========================================================================
+    # 6. Apply Penalties / Regularization
+    # =========================================================================
+    if reg > 0.0:
+        A_mat += reg * np.eye(M_aux)
+
+    if reg_S > 0.0:
+        b_tensor += reg_S * np.einsum('p,jk->jkp', C_mat[:, 0], S_parent)
+        A_mat += reg_S * np.outer(C_mat[:, 0], C_mat[:, 0])
+        
+    if w_mu > 0.0:
+        for x in range(3):
+            b_tensor += w_mu * np.einsum('p,jk->jkp', V_aux[:, x], r_parent[x])
+        A_mat += w_mu * (V_aux @ V_aux.T)
+        
+    if w_quad > 0.0 and quad_map is not None:
+        W_vec = np.array([w for (_, _, _, w) in quad_map])
+        for q, (i, j, f, w) in enumerate(quad_map):
+            b_tensor += w_quad * w * np.einsum('p,jk->jkp', V_quad_aux[:, q], rr_parent[f])
+        A_mat += w_quad * (V_quad_aux * W_vec) @ V_quad_aux.T
+        
+    if reg_r2 > 0.0:
+        R_vdw = radii.VDW[mol.atom_charges()]
+        for A in range(auxmol.natm):
+            shl0, shl1, ao0, ao1 = auxmol.aoslice_by_atom()[A]
+            
+            # Use L2-normalized r2 variance for penalties
+            r2_slice = r2_L2[ao0:ao1]
+            A_mat[ao0:ao1, ao0:ao1] += (reg_r2 / (R_vdw[A]**4)) * np.outer(r2_slice, r2_slice)
+
+    # =========================================================================
+    # 7. Solve System & Extract Charge Operators
+    # =========================================================================
+    X_P_nm = solve_kkt_tensor_reshaped(A_mat, b_tensor, C_mat, d_tensor)
+    Q_A = np.zeros((mol.natm, Np, Np))
+
+    for A in range(auxmol.natm):
+        shl0, shl1, ao0, ao1 = auxmol.aoslice_by_atom()[A]
+        # Sum down the resolved M_aux dimension, weighting each X_P by its volume integral (c_P)
+        Q_A[A] -= np.einsum('p,pnm->nm', c_P[ao0:ao1], X_P_nm[ao0:ao1, :, :])
+
+    if return_fit:
+        return Q_A, A_mat_df, b_tensor_df, X_P_nm
+        
+    return Q_A
+
+
+
+
+getDMFitChargeOperatorSphericalAux = getDMFitChargeOperatorSphericalAuxOld
+def getDMFitChargeDipoleOperatorAux(mol, aux_basis_min, reg=1e-12, reg_r2=0.0, reg_S=0.0, reg_dip=0.0, reg_tik_r2=0.0, reg_inter=0.0,
+                                       w_df=1.0, w_mu=0.0, w_ovlp=0.0, w_quad=0.0, 
+                                       return_fit=False, constrain_dipole=False, 
+                                       constrain_quad=False, quad_map=None):
+    # Build auxiliary basis explicitly
+    auxmol = gto.Mole()
+    auxmol.atom = mol.atom 
+    auxmol.unit = mol.unit
+    auxmol.basis = aux_basis_min
+    auxmol.charge = np.sum(mol.atom_charges())
+    auxmol.build(dump_input=False)
+    
+    Np = mol.nao
+    M_aux = auxmol.nao
+    
+    # =========================================================================
+    # 1. Parent Integrals for Penalties & Constraints
+    # =========================================================================
+    S_parent = mol.intor('int1e_ovlp')
+    r_parent = mol.intor('int1e_r') 
+    rr_parent = mol.intor('int1e_rr')
+
+    # =========================================================================
+    # 2. Extract Scaling Factors and Geometric Properties (S and P types)
+    # =========================================================================
+    c_P = np.zeros(M_aux)
+    r2_aux = np.zeros(M_aux) 
+    V_aux = np.zeros((M_aux, 3))
+    quad_map = [
+        (0, 0, 0, 1.0), # xx
+        (0, 1, 1, 2.0), # xy (weight 2 for off-diagonal rotational invariance)
+        (0, 2, 2, 2.0), # xz
+        (1, 1, 4, 1.0), # yy
+        (1, 2, 5, 2.0), # yz
+        (2, 2, 8, 1.0)  # zz
+        ]   
+    
+    V_quad_aux = np.zeros((M_aux, 6)) if quad_map is not None else None
+    
+    C_mat_0 = np.zeros(M_aux)               # Global charge sum (1 for S, 0 for P)
+    local_dipole_aux = np.zeros((M_aux, 3)) # Local dipole mapper for mu_A
+    
+    for i in range(auxmol.nbas):
+        l = auxmol.bas_angular(i)
+        if l > 1:
+            raise ValueError("This formulation requires purely S and P-type auxiliary functions.")
+            
+        alphas = auxmol.bas_exp(i)
+        nctr = auxmol._bas[i, gto.NCTR_OF]
+        coeffs = auxmol.bas_ctr_coeff(i)
+        
+        A = auxmol.bas_atom(i)
+        R_A = auxmol.atom_coord(A)
+        start_ao = auxmol.ao_loc_nr()[i]
+        
+        for c in range(nctr):
+            d_i = coeffs[:, c]
+            
+            if l == 0:
+                ao_idx = start_ao + c
+                
+                # External helper for L1 S-type scaling (unit charge)
+                c_P[ao_idx] = calculate_L1_scaling_factor(alphas, d_i) 
+                
+                # S-type spatial variance
+                r2_primitive_integrals = d_i * (1.5 / alphas) * (2.0 * np.pi / alphas)**0.75
+                r2_aux[ao_idx] = c_P[ao_idx] * np.sum(r2_primitive_integrals)
+                
+                C_mat_0[ao_idx] = 1.0
+                V_aux[ao_idx] = R_A
+                local_dipole_aux[ao_idx] = 0.0 # No local dipole relative to atom center
+                
+                if quad_map is not None:
+                    Q_tensor = np.outer(R_A, R_A) + (r2_aux[ao_idx] / 3.0) * np.eye(3)
+                    for q, (qi, qj, f, w) in enumerate(quad_map):
+                        V_quad_aux[ao_idx, q] = Q_tensor[qi, qj]
+                        
+            elif l == 1:
+                # P-type: calculate scaling for Unit Dipole Normalization
+                # Int x * (x * exp(-alpha r^2)) dr = pi^1.5 / (2 * alpha^2.5)
+                #p_dipole_contracted = np.sum(d_i * (np.pi / alphas)**1.5 / (2.0 * alphas))
+                #scale = 1.0 / p_dipole_contracted
+                
+                # 1. Fetch PySCF's L2 normalization for the P-type primitives
+                #n_prim = gto.gto_norm(1, alphas)
+#
+                ## 2. Multiply the unnormalized analytical integral by n_prim
+                #unnorm_dipole = (np.pi / alphas)**1.5 / (2.0 * alphas)
+                #p_dipole_contracted = np.sum(d_i * n_prim * unnorm_dipole)
+#
+                #scale = 1.0 / p_dipole_contracted
+                
+                scale = calculate_dipole_scaling_factor_P(alphas,d_i)
+                #scale = (1.25)*calculate_dipole_scaling_factor_P(alphas,d_i)
+                
+                # PySCF orders P components as x, y, z
+                for m in range(3):
+                    ao_idx = start_ao + c * 3 + m
+                    c_P[ao_idx] = 1.0*scale
+                    
+                    # P-functions integrate to exactly 0 total charge
+                    C_mat_0[ao_idx] = 0.0 
+                    
+                    unit_dipole = np.zeros(3)
+                    unit_dipole[m] = 1.0
+                    
+                    # The global dipole contribution of this basis function
+                    V_aux[ao_idx] = unit_dipole 
+                    local_dipole_aux[ao_idx] = +unit_dipole 
+                    
+                    # Spatial variance (r^2) of a p-function integrates to 0 (odd function)
+                    # r2_aux[ao_idx] defaults to 0.0
+                    
+                    if quad_map is not None:
+                        # Q_ij = R_{A,j} * delta_{im} + R_{A,i} * delta_{jm}
+                        Q_tensor = np.zeros((3, 3))
+                        Q_tensor[m, :] += R_A
+                        Q_tensor[:, m] += R_A
+                        for q, (qi, qj, f, w) in enumerate(quad_map):
+                            V_quad_aux[ao_idx, q] = Q_tensor[qi, qj]
+
+    # =========================================================================
+    # 3. Construct Density Fitting Arrays (Applying c_P scaling)
+    # =========================================================================
+    int3c_L2 = df.incore.aux_e2(mol, auxmol, intor='int3c2e', aosym='s1', comp=1) 
+    int2c_L2 = auxmol.intor('int2c2e', aosym='s1', comp=1) 
+
+    b_tensor_df = int3c_L2 * c_P[None,None,:] 
+    A_mat_df = np.einsum('p,q,pq->pq', c_P, c_P, int2c_L2)
+
+    b_tensor = w_df * b_tensor_df.copy()
+    A_mat = w_df * A_mat_df.copy()
+
+    if w_ovlp > 0.0:
+        ovlp3c_L2 = df.incore.aux_e2(mol, auxmol, intor='int3c1e', aosym='s1', comp=1) 
+        ovlp2c_L2 = auxmol.intor('int1e_ovlp', aosym='s1', comp=1)
+        
+        ovlp3c_L1 = ovlp3c_L2 * c_P
+        ovlp2c_L1 = np.einsum('p,q,pq->pq', c_P, c_P, ovlp2c_L2)
+        
+        b_tensor += w_ovlp * ovlp3c_L1
+        A_mat += w_ovlp * ovlp2c_L1
+
+    # =========================================================================
+    # 4. Populate Constraints (C_mat, d_tensor)
+    # =========================================================================
+    n_constraints = 1 + (3 if constrain_dipole else 0) + (6 if constrain_quad else 0)
+    C_mat = np.zeros((M_aux, n_constraints))
+    d_tensor = np.zeros((Np, Np, n_constraints))
+    
+    C_mat[:, 0] = C_mat_0
+    d_tensor[:, :, 0] = S_parent
+    col_idx = 1
+    
+    if constrain_dipole:
+        C_mat[:, col_idx:col_idx+3] = V_aux
+        for x in range(3):
+            d_tensor[:, :, col_idx+x] = r_parent[x]
+        col_idx += 3
+        
+    if constrain_quad and quad_map is not None:
+        for q, (i, j, f, w) in enumerate(quad_map):
+            C_mat[:, col_idx+q] = V_quad_aux[:, q]
+            d_tensor[:, :, col_idx+q] = rr_parent[f]
+
+    # =========================================================================
+    # 5. Apply Penalties / Regularization
+    # =========================================================================
+    if reg > 0.0:
+        A_mat += reg * np.eye(M_aux)
+
+    if reg_S > 0.0:
+        b_tensor += reg_S * np.einsum('p,jk->jkp', C_mat[:, 0], S_parent)
+        A_mat += reg_S * np.outer(C_mat[:, 0], C_mat[:, 0])
+        
+    if w_mu > 0.0:
+        for x in range(3):
+            b_tensor += w_mu * np.einsum('p,jk->jkp', V_aux[:, x], r_parent[x])
+        A_mat += w_mu * (V_aux @ V_aux.T)
+        
+    if w_quad > 0.0 and quad_map is not None:
+        W_vec = np.array([w for (_, _, _, w) in quad_map])
+        for q, (i, j, f, w) in enumerate(quad_map):
+            b_tensor += w_quad * w * np.einsum('p,jk->jkp', V_quad_aux[:, q], rr_parent[f])
+        A_mat += w_quad * (V_quad_aux * W_vec) @ V_quad_aux.T
+        
+    if reg_r2 > 0.0:
+        R_vdw = radii.VDW[mol.atom_charges()]
+        for A in range(auxmol.natm):
+            shl0, shl1, ao0, ao1 = auxmol.aoslice_by_atom()[A]
+            r2_slice = r2_aux[ao0:ao1]
+            A_mat[ao0:ao1, ao0:ao1] += (reg_r2 / (R_vdw[A]**4)) * np.outer(r2_slice, r2_slice)
+    
+    if reg_dip > 0.0:
+        ao_loc = auxmol.ao_loc_nr()
+        for i in range(auxmol.nbas):
+            l = auxmol.bas_angular(i)
+            if l == 1:
+                ao0 = ao_loc[i]
+                ao1 = ao_loc[i+1]
+                A_mat[ao0:ao1, ao0:ao1] += reg_dip * np.eye(ao1-ao0)
+    
+    if reg_tik_r2 > 0.0:
+        # Base Integrals for Tikhonov Regularization (Apply c_P scaling)
+        # Calculate global integrals in the L2-normalized auxiliary basis
+        S_aux_L2 = auxmol.intor('int1e_ovlp')
+        r_aux_L2 = auxmol.intor('int1e_r')   # Shape: (3, M_aux, M_aux)
+        r2_aux_L2 = auxmol.intor('int1e_r2') # Shape: (M_aux, M_aux)
+
+        # Scale to L1-normalized basis using your c_P array
+        S_aux_L1 = np.einsum('p,q,pq->pq', c_P, c_P, S_aux_L2)
+        r_aux_L1 = np.einsum('p,q,xpq->xpq', c_P, c_P, r_aux_L2)
+        r2_aux_L1 = np.einsum('p,q,pq->pq', c_P, c_P, r2_aux_L2)
+        for A in range(auxmol.natm):
+            shl0, shl1, ao0, ao1 = auxmol.aoslice_by_atom()[A]
+            R_A = auxmol.atom_coord(A)
+            R_A_sq = np.dot(R_A, R_A)
+            
+            # Extract integral slices for the current atom's block
+            S_block = S_aux_L1[ao0:ao1, ao0:ao1]
+            r_block = r_aux_L1[:, ao0:ao1, ao0:ao1]
+            r2_block = r2_aux_L1[ao0:ao1, ao0:ao1]
+            
+            # Shift the operator to atom A's center
+            local_r2_matrix = (r2_block 
+                               - 2.0 * np.einsum('x,xpq->pq', R_A, r_block) 
+                               + R_A_sq * S_block)
+            
+            # Add directly to the diagonal block of A_mat
+            A_mat[ao0:ao1, ao0:ao1] += reg_tik_r2 * local_r2_matrix
+
+    
+    
+    if reg_inter > 0.0:
+        # 1. Start with the fully c_P-scaled Coulomb metric
+        A_inter = A_mat_df.copy()
+        
+        # 2. Zero out the intra-atomic (diagonal) blocks
+        for A in range(auxmol.natm):
+            shl0, shl1, ao0, ao1 = auxmol.aoslice_by_atom()[A]
+            A_inter[ao0:ao1, ao0:ao1] = 0.0
+            
+        # 3. Add to the main fitting matrix
+        A_mat += reg_inter * A_inter
+        
+    # =========================================================================
+    # 6. Solve System & Extract Charge and Dipole Operators
+    # =========================================================================
+    X_P_nm = solve_kkt_tensor_reshaped(A_mat, b_tensor, C_mat, d_tensor)
+    
+    Q_A = np.zeros((mol.natm, Np, Np))
+    mu_A = np.zeros((mol.natm, 3, Np, Np))
+
+    for A in range(auxmol.natm):
+        shl0, shl1, ao0, ao1 = auxmol.aoslice_by_atom()[A]
+        
+        X_A = X_P_nm[ao0:ao1, :, :]
+        C_A = C_mat_0[ao0:ao1] 
+        loc_dip_A = local_dipole_aux[ao0:ao1]
+        
+        Q_A[A] = -np.einsum('pij,p->ij', X_A, C_A, optimize=True)
+        mu_A[A] = -np.einsum('pij,px->xij', X_A, loc_dip_A, optimize=True)
+
+    if return_fit:
+        return Q_A, mu_A, A_mat_df, b_tensor_df, X_P_nm
+        
+    return Q_A, mu_A
 
 def getDMFitChargeOperatorDipoleSphericalOld(mol, min_basis='minao', reg=1e-12, reg_r2=0.0, reg_S=0.0, 
                                           w_mu=0.0, w_ovlp=0.0, w_quad=0.0, w_df=1.0, reg_dip=0.0,
@@ -2165,7 +3016,7 @@ def getIPESPMat(mol,grid_coords,block_size=16):
         ipesp[:,start:end,:,:] = -mol.intor('cint1e_grids_ip_sph',grids=grid_coords[start:end,:])
     return ipesp
 
-def getESPFMultipoleOperators(mol,grid_coords,weights,l_max=0,block_size=16,add_correction=True,return_fit_vars=False,
+def getESPFMultipoleOperatorsOld(mol,grid_coords,weights,l_max=0,block_size=16,add_correction=True,return_fit_vars=False,
                               S=None,r_int=None,reg_type="none",reg_param=0.0,store_esp=True):
     '''
     gets ESPF charge operators.
@@ -2253,6 +3104,133 @@ def getESPFMultipoleOperators(mol,grid_coords,weights,l_max=0,block_size=16,add_
         return Q
     
 
+
+def getESPFMultipoleOperators(mol, grid_coords, weights, l_max=0, block_size=16, add_correction=True, return_fit_vars=False,
+                              S=None, r_int=None, reg_type="none", reg_param=0.0, store_esp=True, use_kkt=False):
+    '''
+    gets ESPF charge operators.
+    '''
+    # get coordinates of 
+    R = mol.atom_coords(unit="Bohr")
+    
+    # general info
+    N_grid = grid_coords.shape[0]
+    N = R.shape[0]
+    N_Q_atm = getNumMultipolePerAtom(l_max) # Assuming this is defined in your broader scope
+    N_Q = N * N_Q_atm
+    N_AO = mol.nao
+    
+    # get the ESP matrix D_ka
+    D = getESPMatrix(grid_coords, R, l_max) # Assuming this is defined in your broader scope
+    
+    # weights of grid points
+    w = weights
+    
+    # matrices for fitting
+    w_D = w.reshape((N_grid, 1)) * D
+    A_fit = (D.T).dot(w_D)
+    A_fit0_diag = np.diag(A_fit) + 0.
+    if reg_type in ["mulliken", "magnitude"]:
+        A_fit[np.diag_indices_from(A_fit)] *= (1.0 + reg_param)
+    if reg_type in ["resp-style","Z-weighted"]:
+        A_fit[np.diag_indices_from(A_fit)] += (reg_param)
+        
+    A_fit_inv = inv(A_fit)
+    
+    if store_esp:
+        # get the ESP potential operators at grid points
+        esp = getESPMat(mol, grid_coords, block_size) 
+        b_fit = np.einsum('ka,knm->anm', w_D, esp, optimize=True)
+    else:
+        # if esp is not stored esp is evaluated in blocks of size "block_size"
+        N_block = int(np.ceil(N_grid / block_size))
+        b_fit = np.zeros([N_Q, N_AO, N_AO])
+        for i in range(0, N_block):
+            start = i * block_size
+            end = min(start + block_size, N_grid)
+            esp = -mol.intor('int1e_grids', grids=grid_coords[start:end, :])
+            b_fit += np.einsum('ka,knm->anm', w_D[start:end], esp)
+        esp = None
+        
+    if reg_type == "mulliken":
+        Q_mulliken = getMullikenMultipoleOperators(mol, l_max=l_max, S=S, r_int=r_int)
+        reg_b_fit = reg_param * A_fit0_diag[:, None, None] * Q_mulliken
+        b_fit += reg_b_fit
+    if reg_type == "Z-weighted":
+        Q_tot = -mol.intor('int1e_ovlp') if S is None else -S
+        Z = mol.atom_charges()
+        Z_tot = np.sum(Z)
+        b_fit[:N,:,:] += (reg_param/Z_tot)*(Z[:,None,None])*Q_tot[None,:,:]
+        if l_max >0: 
+            mu_tot = -mol.intor('int1e_r') if r_int is None else -r_int
+            for alpha in range(3):
+                start = (alpha + 1) * N
+                end = start + N
+                b_fit[start:end,:,:] += (reg_param/Z_tot)*(Z[:,None,None])*mu_tot[alpha,:,:]
+
+    # --- EXACT KKT CONSTRAINTS ---
+    if use_kkt and add_correction:
+        M = 1 if l_max == 0 else 4
+        C = np.zeros((N_Q, M))
+        
+        # 1. Total Charge Constraint
+        C[0:N, 0] = 1.0 
+        Q_tot = -mol.intor('int1e_ovlp') if S is None else -S
+        d_list = [Q_tot]
+        
+        # 2. Total Dipole Constraints (if applicable)
+        if l_max > 0:
+            mu_tot = -mol.intor('int1e_r') if r_int is None else -r_int
+            for alpha in range(3):
+                # Dipole contribution from atomic point charges (Q_A * R_A)
+                C[0:N, alpha+1] = R[:, alpha]
+                
+                # Dipole contribution from atomic dipoles (Q_{A, alpha})
+                start = (alpha + 1) * N
+                end = start + N
+                C[start:end, alpha+1] = 1.0
+                
+                d_list.append(mu_tot[alpha])
+                
+        # Stack targets into (N_AO, N_AO, M)
+        d = np.stack(d_list, axis=-1)
+        
+        # Reshape b_fit from (N_Q, N_AO, N_AO) to (N_AO, N_AO, N_Q) for the KKT solver
+        b_kkt = np.moveaxis(b_fit, 0, -1)
+        
+        # Solve
+        Q = solve_kkt_tensor_reshaped(A_fit, b_kkt, C, d)
+
+    # --- ORIGINAL POST-HOC CORRECTION ---
+    else:
+        # get the uncorrected Q operators
+        Q = np.einsum('ab,bnm->anm', A_fit_inv, b_fit)
+        
+        # add post-hoc correction
+        if add_correction:
+            if S is None:
+                Q_tot = -mol.intor('int1e_ovlp')
+            else:
+                Q_tot = -S
+            Q[0:N,:,:] = Q[0:N,:,:] + (1./N)*(Q_tot - np.einsum('Anm->nm', Q[0:N,:,:]))
+            if l_max > 0:
+                if r_int is None:
+                    mu_tot = -mol.intor('int1e_r')
+                else:
+                    mu_tot = -r_int
+                for alpha in range(0,3):
+                    start = (alpha+1)*N
+                    end = start + N
+                    Q[start:end,:,:] = Q[start:end,:,:] + (1./N)*(mu_tot[alpha,:,:] - np.einsum('Anm->nm', Q[start:end,:,:]) - np.einsum('A,Anm->nm', R[:,alpha], Q[0:N,:,:]))
+
+    if return_fit_vars:
+        fit_vars = {"A_fit": A_fit, "A_fit_inv": A_fit_inv, "b_fit": b_fit, "D": D, "w": w, "esp": esp, "w_D": w_D, "A_fit0_diag": A_fit0_diag}
+        if reg_type == "mulliken":
+            fit_vars["Q_mulliken"] = Q_mulliken
+        return Q, fit_vars
+    else:
+        return Q
+    
 def getESPMatrix(grid_coords,R,l_max):
     '''
     gets the ESP matrix of ESP at grid coords getd by point multipoles at R.
@@ -3043,34 +4021,58 @@ class QMMultipole:
         # espf regularisation
         self.espf_reg_type = None
         self.espf_reg_param = 0.0
+        self.espf_use_kkt = False
         
         # density fitting charge parameters
         if self.multipole_order == 0:
-            self.df_min_basis = setup_default_min_basis()
-            self.df_reg = 1.0e-12
-            self.df_reg_r2 = 0.0
+            self.df_min_basis = setup_default_min_basis(add_pol=True)
+            self.df_reg = 1.0e-8
+            self.df_reg_r2 = 0.0e-2
             self.df_reg_S = 0.0 
             self.df_w_df = 1.0 
-            self.df_w_mu = 1.0
+            self.df_w_mu = 1.0e0
             self.df_w_ovlp = 1.0
             self.df_w_quad = 0.0
-            self.df_aux_basis = 'weigend-jfit'
+            self.df_w_esp = 0.0
+            #self.df_aux_basis = 'weigend-jfit' # REMINDER TO SELF: I SHOULD CHANGE THIS FOR THE ETG BASIS
+            self.df_aux_basis = MODULE_DIR + "/data/scalminihpol_con_aux.dat"
+            
             self.df_constrain_dip = False
             self.df_constrain_quad = False
             self.df_reg_dip = 0.0
+            self.df_aux_basis_min = MODULE_DIR + "/data/scalminihpoltm0_con_aux.dat"
+            #self.df_aux_basis_min = MODULE_DIR + "/data/scalmini_stypecon_aux.dat"
+            #self.df_aux_basis_min = MODULE_DIR + "/data/scalminihsv2_con_aux.dat"
+            #self.df_aux_basis_min = MODULE_DIR + "/data/minihpoltm_con_aux.dat"
+            #self.df_aux_basis_min = MODULE_DIR + "/data/scalminipl_con_aux.dat"
+            #self.df_aux_basis_min = MODULE_DIR + "/data/newaux_allelems.dat"
+            #self.df_aux_basis_min = MODULE_DIR + "/data/sto3gaux_allelems.dat"
+            #self.df_aux_basis_min = MODULE_DIR + "/data/pcseg0aux_allelems.dat"
+            self.df_reg_tik_r2 = 0.0e-3
+            self.df_reg_inter = 0.0e-2
         else:
             self.df_min_basis = setup_default_min_basis(add_pol=True)
-            self.df_reg = 1.0e-12
+            self.df_reg = 1.0e-8
             self.df_reg_r2 = 0.0
             self.df_reg_S = 0.0 
             self.df_w_df = 1.0 
             self.df_w_mu = 0.0
             self.df_w_ovlp = 1.0
-            self.df_w_quad = 1.0e-1
-            self.df_aux_basis = 'weigend-jfit'
+            self.df_w_quad = 1.0
+            #self.df_aux_basis = 'weigend-jfit'
+            self.df_aux_basis = MODULE_DIR + "/data/scalminihpol_spcon_aux.dat"
             self.df_constrain_dip = True
             self.df_constrain_quad = False
-            self.df_reg_dip = 0.0
+            self.df_reg_dip = 0.0e-1
+            self.df_aux_basis_min = MODULE_DIR + "/data/scalminihpoltm0_spcon_aux.dat"
+            #self.df_aux_basis_min = MODULE_DIR + "/data/scalminihsv2_spcon_aux.dat"
+            #self.df_aux_basis_min = MODULE_DIR + "/data/minihpoltm_spcon_aux.dat"
+            #self.df_aux_basis_min = MODULE_DIR + "/data/newaux_allelems_sp.dat"
+            #self.df_aux_basis_min = MODULE_DIR + "/data/sto3gaux_allelems_sp.dat"
+            #self.df_aux_basis_min = MODULE_DIR + "/data/pcseg0aux_allelems_sp.dat"
+            self.df_reg_tik_r2 = 0.0
+            self.df_reg_inter = 0.0
+        
             
         return
     
@@ -3094,6 +4096,8 @@ class QMMultipole:
             self.getMullikenMultipoleOperators(mol=mol)
         elif self.multipole_method == "df":
             self.getDensityFittedMultipoleOperators(mol=mol)
+        elif self.multipole_method == "dfaux": 
+            self.getDensityFittedAuxMultipoleOperators(mol=mol)
         else:
             raise Exception("Error:",self.multipole_method,"is not a recognised multipole method.")
         #print("Charge operator time = ", timer()-t0)
@@ -3152,7 +4156,9 @@ class QMMultipole:
         self.evaluateMultipoleIntegrals(mol=mol)
         Q,fit_vars = getESPFMultipoleOperators(mol,grid_coords,weights,l_max=self.multipole_order,
                                                add_correction=self.corr_espf,return_fit_vars=True,S=self.S,r_int=self.r_int,
-                                               block_size=self.grid_block_size,reg_type=self.espf_reg_type,reg_param=self.espf_reg_param,store_esp=self.store_esp)
+                                               block_size=self.grid_block_size,reg_type=self.espf_reg_type,
+                                               reg_param=self.espf_reg_param,store_esp=self.store_esp,
+                                              use_kkt=self.espf_use_kkt)
         self.espf_fit_vars = fit_vars
         self.Q = Q 
         return 
@@ -3184,6 +4190,49 @@ class QMMultipole:
                                                      w_ovlp=self.df_w_ovlp, w_quad=self.df_w_quad, aux_basis=self.df_aux_basis, 
                                                     return_fit=False, constrain_dipole=self.df_constrain_dip, 
                                                      constrain_quad=self.df_constrain_quad, reg_dip=self.df_reg_dip)
+            self.Q = np.concatenate((Q,mu.swapaxes(0, 1).reshape(-1, mu.shape[2], mu.shape[3])),axis=0)
+            
+        else:
+            
+            print("Error! Only charges and dipoles implemented.")
+        
+        return
+    
+    def getDensityFittedAuxMultipoleOperators(self,mol=None):
+        '''
+        Generates the Minimal basis density fitted charges
+        '''
+        if mol is None:
+            mol = self.mol
+
+        
+        if self.multipole_order == 0 :
+            if self.df_w_esp > 0 :
+                grid_coords,grid_atms = getESPFGrid(mol,self.n_ang,self.n_rad,rad_scal=self.rad_scal,rad_method=self.rad_grid_method,ang_method=self.ang_grid_method)
+                weights = getGridWeights(mol,grid_coords,weight_mode=self.weight_mode,hard_cut_vdw_scal=self.hard_cut_scal,sigma=self.smooth_sigma,smooth_func=self.weight_smooth_func)
+                self.espf_grid_weights = weights
+                self.espf_grid = grid_coords
+                self.espf_grid_atms = grid_atms
+                esp_grid_data = (self.espf_grid,self.espf_grid_weights)
+            else:
+                esp_grid_data = None
+            self.Q = getDMFitChargeOperatorSphericalAux(mol, self.df_aux_basis_min, reg=self.df_reg, reg_r2=self.df_reg_r2,
+                                                     reg_S=self.df_reg_S, w_df=self.df_w_df, w_mu=self.df_w_mu, 
+                                                     w_ovlp=self.df_w_ovlp, w_quad=self.df_w_quad, 
+                                                    return_fit=False, constrain_dipole=self.df_constrain_dip, 
+                                                     constrain_quad=self.df_constrain_quad, reg_tik_r2=self.df_reg_tik_r2,reg_inter=self.df_reg_inter,
+                                                       w_esp=self.df_w_esp, esp_grid_data=esp_grid_data)
+            #if self.multipole_order > 0 :
+            #    N = self.Q.shape[0]
+            #    nao = self.Q.shape[1]
+            #    self.Q = np.concatenate((self.Q,np.zeros([3*N,nao,nao])),axis=0)
+            
+        elif self.multipole_order == 1 :
+            Q,mu = getDMFitChargeDipoleOperatorAux(mol, self.df_aux_basis_min, reg=self.df_reg, reg_r2=self.df_reg_r2,
+                                                     reg_S=self.df_reg_S, w_df=self.df_w_df, w_mu=self.df_w_mu, 
+                                                     w_ovlp=self.df_w_ovlp, w_quad=self.df_w_quad, reg_dip=self.df_reg_dip,
+                                                    return_fit=False, constrain_dipole=self.df_constrain_dip, 
+                                                     constrain_quad=self.df_constrain_quad, reg_tik_r2=self.df_reg_tik_r2,reg_inter=self.df_reg_inter)
             self.Q = np.concatenate((Q,mu.swapaxes(0, 1).reshape(-1, mu.shape[2], mu.shape[3])),axis=0)
             
         else:

@@ -50,14 +50,18 @@ class QMMMSystem:
         # resp state properties/forces default value
         self.resp_states = [1]
         
-        # use WCA repulsion
-        self.use_wca = False
-        
-        # use CP (charge penetration) repulsion correction
+        # use CP (charge penetration) repulsion correction (Highly recommended)
         self.use_cp_rep = False
+        
+        # use WCA repulsion (Mostly for testing/legacy)
+        self.use_wca = False
         
         # use pre-lim cl force
         self.use_prelim_cl_force = None # None defaults to whatever the mm system does
+        
+        # use exact permanent multipole embedding in a certain cut-off radius
+        self.use_exact_perm_charge = False
+        self.perm_cutoff_radius = None
         
         return
     
@@ -134,6 +138,12 @@ class QMMMSystem:
         energy_terms["mm remainder"] = self.mm_system.getEnergy() - energy_terms["mm electrostatics"]
         end = timer()
         if self.print_info : print("MM energy time:",end-start,"s")
+        
+        if self.use_exact_perm_charge:
+            # sets up exact perm charge embedding in the QM system for atoms within a certain cut-off radius
+            E_nuc_perm = self.setupExactPermEmbeddingQM()
+            energy_terms["nuc perm"] = E_nuc_perm
+            
         # get the QM + interaction energy 
         # TODO - modify to deal with multiple energies from excited states possibly return a list of dictionaries, one for each state
         
@@ -323,6 +333,54 @@ class QMMMSystem:
         self.rep_info = {"type quasi-orbital info":type_quasiorb_info,"MM types":mm_types,"cutoff":cutoff}
         
         return
+    
+    def setupExactPermChargeEmbedding(self,cutoff_radius=None):
+        '''
+        Sets up a calculation where the permanent multipoles of MM atoms within a cut-off are treated with "exact embedding"
+        Restrictions:
+        1) Only for charges at the moment
+        2) No force calculations are possible
+        This is primarily meant for testing purposes.
+        '''
+        # turn on the permanent charge embedding and set-up the cut-off radius
+        self.use_exact_perm_charge = True
+        # cut-off radius is assumed to be in atomic units!
+        self.perm_cutoff_radius = cutoff_radius
+        # turn on removal of perm charge terms from MM U_1 terms in MMSystem
+        self.mm_system.remove_perm_charge = True
+        if cutoff_radius is None:
+            self.mm_system.perm_cutoff_radius = None
+        else:
+            self.mm_system.perm_cutoff_radius = cutoff_radius * Data.BOHR_TO_NM
+        # turn on QMSystem exact embedding option
+        self.qm_system.use_ext_charge_embedding = True
+        
+        return
+    
+    def setupExactPermEmbeddingQM(self):
+        '''
+        Sets up exact perm charge embedding in the QM system
+        '''
+        
+        # extract cut-off MM atom info
+        R_ext, charges_ext, dipoles_ext, quadrupoles_ext   = self.mm_system.getExtChargeInfo()
+        
+        # pass this info to the QM system to calculate the electron energy interaction
+        self.qm_system.ext_charge_positions = R_ext
+        self.qm_system.ext_charges = charges_ext
+        self.qm_system.ext_dipoles = dipoles_ext
+        self.qm_system.ext_quadrupoles = quadrupoles_ext
+        
+        # calculate the 
+        Z = self.qm_system.mol.atom_charges()
+        E_nuc_perm = 0.0
+        for A in range(0,len(Z)):
+            R = R_ext - self.qm_positions[A,:]
+            r = np.linalg.norm(R,axis=1)
+            Phi = np.sum(charges_ext / r)
+            E_nuc_perm += Z[A]*Phi
+        
+        return E_nuc_perm
     
     def getQuasiOrbitalInfo(self,atom_type_info,setup_info):
         '''

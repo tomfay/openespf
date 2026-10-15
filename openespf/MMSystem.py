@@ -60,6 +60,8 @@ class MMSystem:
         self.damp_charge_only = False
         self.damp_chargedipole_only = False
         self.resp_mode_force = "linear"
+        self.remove_perm_charge = False
+        self.perm_cutoff_radius = None
         
         # Get MM system simulation object
         if not simulation is None:
@@ -1013,11 +1015,19 @@ class MMSystem:
         else:
             raise Exception("Multipole order currently must be 0 or 1. multipole_order =",multipole_order,"is not allowed.")
         
+        # correct the U_1 term to smear the MM point multipoles analogous to thole damping for induced dipole interactions
         if self.damp_perm:
             dU_1 = self.getPermMultipoleDampCorrectionCharge(multipole_order,get_force_corr=False)
             U_1 += dU_1
             U_1_uncorr = U_1 - dU_1
         
+        # remove the MM permanent charge contributions to the U_1 - useful if you want to add them in "exactly"
+        if self.remove_perm_charge:
+            # get the permanent multipole contributions to U_1 in a certain cut-off radius
+            dU_1 = self.getMultipoleInteractions(multipole_order,cutoff_radius=self.perm_cutoff_radius,use_damped_multipole=self.damp_perm)
+            # remove these terms
+            U_1 -= dU_1
+
         # collect everything together into a dictionary and convert units as needed
         if units_out == "OpenMM":
             pol_resp = {"U_0":U_0,"U_1":U_1,"U_2":U_2,"units":units_out} 
@@ -1069,8 +1079,6 @@ class MMSystem:
             Eh_per_a0 = Eh / a0
             U_0 = U_0 / Eh
             F = F / Eh_per_a0
-            
-            
             
         return U_0,F
     
@@ -2203,6 +2211,230 @@ class MMSystem:
         
         return q_A,q_B,x_A,x_B
 
+    def getMultipoleInteractions(self,multipole_order,cutoff_radius=None,use_damped_multipole=True):
+        '''
+        This returns the U_a terms corresponding to QM-MM interactions involving the charges on MM atoms.
+        Need to subtract this term if exact permanent charge embedding is used.
+        '''
+        
+        # WARNING - currently only charge interactions are removed by default
+        charge_only = True
+        charge_dipole_only = False
+        
+        pbc_dims = self.getPBC(units="nm")
+        
+        R_QM = np.array([[v.x,v.y,v.z] for v in self.qm_positions])
+        R_MM = np.array([[v.x,v.y,v.z] for v in self.positions])
+
+        N_QM = R_QM.shape[0]
+        N_MM = R_MM.shape[0]
+        if multipole_order == 0 :
+            N_Q = N_QM
+        else:
+            N_Q = 4 * N_QM
+            
+        dU = np.zeros((N_Q,))
+        if not hasattr(self,"tol_damp_corr_exp"):
+            self.tol_damp_corr_exp = 1.0e-8
+        tol = -np.log(self.tol_damp_corr_exp)
+        removed_atoms = []
+        
+        # determine atoms to remove
+        for B in range(0,N_MM):    
+            for A in range(0,N_QM):
+                # get parameters
+                rA = R_QM[A,:]
+                tholeA = self.qm_thole[A]
+                dampA = self.qm_damp[A]
+                #get parameters
+                params = self.multipole_force.getMultipoleParameters(B)
+                # get nearest image position of MM atom B
+                rB = R_MM[B,:]
+                rBA = extra.getNearestImages(rB,rA,pbc=pbc_dims)
+                r = np.linalg.norm(rBA)
+                rB = rBA + rA
+
+                if cutoff_radius is None:
+                    remove = True
+                elif r < cutoff_radius:
+                    remove = True
+                else:
+                    remove = False
+
+                if remove:
+                    removed_atoms.append(B)
+                    break
+        
+        for B in removed_atoms:
+            params = self.multipole_force.getMultipoleParameters(B)
+            rB = R_MM[B,:]
+            for A in range(0,N_QM):
+                rA = R_QM[A,:]
+                tholeA = self.qm_thole[A]
+                dampA = self.qm_damp[A]
+                rBA = extra.getNearestImages(rB,rA,pbc=pbc_dims)
+                r = np.linalg.norm(rBA)
+                rB = rBA + rA
+                #n_added += 1
+                cA = 1.0
+                cB = params[0]._value
+                dA = np.zeros((3,))
+                dB = np.array(params[1]._value)
+                qA = np.zeros((3,3))
+                qB = np.array(params[2]._value).reshape((3,3))
+                tholeB = params[7]
+                dampB = params[8]
+                # determine if the A-B correction should be adde
+                if dampB < 1.0e-10:
+                    damp = (dampA)**6
+                    damp = tholeA / (damp)
+                else:
+                    damp = (dampA*dampB)**3
+                    damp = min(tholeA,tholeB) / (damp)
+                use_damp_AB = False
+                if ((damp*r*r*r) < tol) and use_damped_multipole:
+                    use_damp_AB = True
+
+                # need to convert dB and qB to the labframe
+                axis_type = params[3]
+                Z = params[4]
+                X = params[5]
+                Y = params[6]
+                if params[4] >= 0: # Z atom
+                    rZ = extra.getNearestImages(np.array(self.positions[Z]._value),R_MM[B,:])+rB
+                else:
+                    rZ = None
+                if params[5] >= 0: # X atom
+                    rX = extra.getNearestImages(np.array(self.positions[X]._value),R_MM[B,:])+rB
+                else:
+                    rX = None
+                if params[6] >= 0: # Y atom
+                    rY = extra.getNearestImages(np.array(self.positions[Y]._value),R_MM[B,:])+rB
+                else:
+                    rY = None
+                dB, qB = extra.getLabFrameMultipoles(dB,qB,rB, axis_type,rZ=rZ,rX=rX,rY=rY)
+
+                if charge_dipole_only:
+                    qB *= 0.0
+                if charge_only:
+                    dB *= 0.0
+                    qB *= 0.0
+
+                if use_damp_AB:
+                    du = extra.getMultipolePairTholeEnergy(rA,rB,cA,cB,dA,dB,qA,qB,damp)
+                else:
+                    du = extra.getMultipolePairEnergy(rA,rB,cA,cB,dA,dB,qA,qB)
+                dU[A] += du
+                if multipole_order > 0 :
+                    cA = 0.
+                    for alpha in range(0,3):
+                        alphaA = N_QM*(1+alpha)+A
+                        dA = np.zeros((3,))
+                        dA[alpha] = 1.0
+                        if not self.use_prelim_mpole:
+                            if use_damp_AB:
+                                du = extra.getMultipolePairTholeEnergy(rA,rB,cA,cB,dA,dB,qA,qB,damp)
+                            else:
+                                du = extra.getMultipolePairEnergy(rA,rB,cA,cB,dA,dB,qA,qB)
+                        else:
+                            c0,c1,x0,x1 = self.getPrelimDipoleChargePosition(0.,dA,rA)
+                            if use_damp_AB:
+                                du  = extra.getMultipolePairTholeEnergy(x0,rB,c0,cB,dA,dB,qA,qB,damp)
+                                du += extra.getMultipolePairTholeEnergy(x1,rB,c1,cB,dA,dB,qA,qB,damp)
+                            else:
+                                du  = extra.getMultipolePairEnergy(x0,rB,c0,cB,dA,dB,qA,qB)
+                                du += extra.getMultipolePairEnergy(x1,rB,c1,cB,dA,dB,qA,qB)
+
+                        dU[alphaA] += du
+        
+        return dU
+    
+    def getExtChargeInfo(self,units_out='AU'):
+        '''
+        This returns the permanent multipole info atoms in a certain cut-off radius of QM atoms
+        '''
+        cutoff_radius = self.perm_cutoff_radius
+        
+        pbc_dims = self.getPBC(units="nm")
+        
+        R_QM = np.array([[v.x,v.y,v.z] for v in self.qm_positions])
+        R_MM = np.array([[v.x,v.y,v.z] for v in self.positions])
+
+        N_QM = R_QM.shape[0]
+        N_MM = R_MM.shape[0]
+            
+        R_ext = []
+        charges_ext = []
+        dipoles_ext = []
+        quadrupoles_ext = []
+        removed_atoms = []
+        
+        # determine atoms to remove
+        for B in range(0,N_MM):    
+            for A in range(0,N_QM):
+                # get parameters
+                rA = R_QM[A,:]
+                tholeA = self.qm_thole[A]
+                dampA = self.qm_damp[A]
+                
+                # get nearest image position of MM atom B
+                rB = R_MM[B,:]
+                rBA = extra.getNearestImages(rB,rA,pbc=pbc_dims)
+                r = np.linalg.norm(rBA)
+                rB = rBA + rA
+
+                if cutoff_radius is None:
+                    remove = True
+                elif r < cutoff_radius:
+                    remove = True
+                else:
+                    remove = False
+
+                if remove:
+                    #get parameters
+                    params = self.multipole_force.getMultipoleParameters(B)
+                    cB = params[0]._value
+                    dB = np.array(params[1]._value)
+                    qB = np.array(params[2]._value).reshape((3,3))
+                    # need to convert dB and qB to the labframe
+                    axis_type = params[3]
+                    Z = params[4]
+                    X = params[5]
+                    Y = params[6]
+                    if params[4] >= 0: # Z atom
+                        rZ = extra.getNearestImages(np.array(self.positions[Z]._value),R_MM[B,:])+rB
+                    else:
+                        rZ = None
+                    if params[5] >= 0: # X atom
+                        rX = extra.getNearestImages(np.array(self.positions[X]._value),R_MM[B,:])+rB
+                    else:
+                        rX = None
+                    if params[6] >= 0: # Y atom
+                        rY = extra.getNearestImages(np.array(self.positions[Y]._value),R_MM[B,:])+rB
+                    else:
+                        rY = None
+                    dB, qB = extra.getLabFrameMultipoles(dB,qB,rB, axis_type,rZ=rZ,rX=rX,rY=rY)
+                    
+                    R_ext.append(rB)
+                    charges_ext.append(cB)
+                    dipoles_ext.append(dB)
+                    quadrupoles_ext.append(qB)
+                    removed_atoms.append(B)
+                    break
+        
+        R_ext = np.array(R_ext)
+        charges_ext = np.array(charges_ext)
+        dipoles_ext = np.array(dipoles_ext)
+        quadrupoles_ext = np.array(quadrupoles_ext)
+        # convert to atomic units if needed (no conv needed for charges)
+        if units_out in ['AU','au']:
+            R_ext *= Data.NM_TO_BOHR
+            dipoles_ext *= Data.NM_TO_BOHR
+            quadrupoles_ext *= (Data.NM_TO_BOHR*Data.NM_TO_BOHR)
+        
+        return R_ext, charges_ext, dipoles_ext, quadrupoles_ext       
+        
+        
     
     def getPermMultipoleDampCorrectionCharge(self,multipole_order,get_force_corr=False,do_test=False):
         

@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 mol = gto.M(atom="4-inputs/acrolein.xyz",unit="Angstrom",basis="STO-3G",charge=0)
 # The DFT method is chosen to be a long-range-corrected functional with density fitting
 mf = dft.RKS(mol)
-mf.xc = "PBE0"
+mf.xc = "cam-b3lyp"
 mf.conv_tol = 1.0e-12
 #mf = mf.density_fit(auxbasis="weigendjkfit")
 

@@ -41,9 +41,9 @@ modeller.delete([r for r in modeller.topology.residues() if r.name == "HOH"])
 residue = [r for r in modeller.topology.residues()][0]
 qm_positions = np.array(modeller.getPositions()._value) * 10. # in Angstrom
 atom =  [[atom.element.symbol , qm_positions[n,:]] for n,atom in enumerate(residue.atoms())] 
-mol = gto.M(atom=atom,unit="Angstrom",basis="pc-1",charge=0)
+mol = gto.M(atom=atom,unit="Angstrom",basis="ma-def2-SVP",charge=0)
 # The DFT method is chosen to be ωB97X-D3/def2-SVP
-mf = dft.RKS(mol)
+mf = dft.RKS(mol).density_fit(auxbasis='weigend-jkfit')
 mf.xc = "HYB_GGA_XC_WB97X_D3"
 resp = tdscf.TDA(mf)
 resp.nstates = 2
@@ -52,8 +52,8 @@ resp.nstates = 2
 
 
 # information about the QM-MM interaction
-multipole_order = 1 # 0=charges, 1=charges+dipoles for QM ESPF multipole operators
-multipole_method = "espf" # "espf" or "mulliken" type multipole operators
+multipole_order = 0 # 0=charges, 1=charges+dipoles for QM ESPF multipole operators
+multipole_method = "dfaux" # "espf" or "mulliken" type multipole operators
 # information for the exchange-repulsion model (atomic units)
 rep_type_info = [{"N_eff":4.0+0.669,"R_dens":1.71*Data.ANGSTROM_TO_BOHR,"rho(R_dens)":1.0e-3},
                 {"N_eff":1.0-0.3345,"R_dens":1.54*Data.ANGSTROM_TO_BOHR,"rho(R_dens)":1.0e-3}] 
@@ -61,7 +61,8 @@ rep_type_dict = {"O":0,"H":1}
 mm_rep_types = [rep_type_dict[atom.element.symbol] for atom in topology.atoms()]
 rep_cutoff = 10.
 # information about how the QM multipole - MM induced dipole interactions are damped (OpenMM units)
-qm_damp = [0.001**(1./6.)]*len(mol.atom_charges())
+alpha_dict = {"C":1.334e-3,"O":0.837e-3,"H":0.496e-3}
+qm_damp = [alpha_dict[A]**(1./6.) for A in mol.elements]*len(mol.atom_charges())
 qm_thole = [0.39]*len(mol.atom_charges())
 
 # create the QMMMSystem object that performs the QM/MM energy calculations
@@ -71,8 +72,21 @@ qmmm_system.setupExchRep(rep_type_info,mm_rep_types,cutoff=rep_cutoff,setup_info
 qmmm_system.mm_system.setQMDamping(qm_damp,qm_thole)
 #qmmm_system.mm_system.test_dipole = 0.001
 #qmmm_system.mm_system.test_charge = 1.0e0
-qmmm_system.qm_system.multipole.espf_reg_type = "mulliken"
-qmmm_system.qm_system.multipole.espf_reg_param = 1e-2
+#qmmm_system.qm_system.multipole.espf_reg_type = "mulliken"
+#qmmm_system.qm_system.multipole.espf_reg_param = 1e-3
+gamma = 1.0
+scal = 1.0e-4
+qmmm_system.qm_system.multipole.df_w_ovlp =  scal*gamma 
+qmmm_system.qm_system.multipole.df_w_df =  scal*1.0/gamma
+qmmm_system.qm_system.multipole.df_w_mu = scal
+#qmmm_system.qm_system.multipole.df_aux_basis_min = './scalminisvdpl_con_aux.dat'
+qmmm_system.qm_system.multipole.df_w_esp = 1.0
+qmmm_system.qm_system.multipole.rad_method = 'vdw2'
+qmmm_system.qm_system.multipole.n_rad = 6
+#qmmm_system.qm_system.multipole.n_ang = 74
+qmmm_system.qm_system.multipole.rad_scal = 0.3
+qmmm_system.qm_system.multipole.hard_cut_scal = 1.35
+qmmm_system.qm_system.multipole.smooth_sigma = 1.0e-1
 
 # get positions for the QM and MM atoms
 mm_positions = simulation.context.getState(getPositions=True).getPositions(asNumpy=True)._value

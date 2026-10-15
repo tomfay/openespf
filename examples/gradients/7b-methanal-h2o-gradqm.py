@@ -31,7 +31,7 @@ mf = dft.ROKS(mol)
 mf.xc = "HF"
 mol = gto.M(atom="7-inputs/methanal.xyz",unit="Angstrom",basis="6-31G*",charge=0,spin=0)
 mf = dft.RKS(mol)
-xc = "HF"
+xc = "cam-b3lyp"
 mf.xc = xc
 #mf = mf.density_fit(auxbasis="weigendjkfit")
 conv_tol = 1.0e-14

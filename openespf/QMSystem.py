@@ -55,11 +55,15 @@ class QMSystem:
         self.positions = self.mol.atom_coords(unit="Bohr")
         self.multipole = QMMultipole(mol=self.mol,multipole_order=self.multipole_order,multipole_method=self.multipole_method)
         self.dm_guess=None
+        self.xy_guess=None
         self.dreem_method = "get_jk"
+        self.use_ext_charge_embedding = False
         
         # debug options
         self.jdreem_pre = 1.0
         self.kdreem_pre = 1.0
+        
+        
         return
     
     def getPositions(self):
@@ -127,6 +131,7 @@ class QMSystem:
         # get the overlap matrix and its inverse & store these for future use
         self.S = self.mf.mol.intor('int1e_ovlp')
         self.S_inv = inv(self.S)
+        
         
         # get the nuclear charges
         Z = self.mf.mol.atom_charges()
@@ -246,7 +251,15 @@ class QMSystem:
             h_qmmm = h_qmmm + h_exchrep
             self.mf_int.get_hcore = lambda *args : (h_int)
             self.mf_qmmm.get_hcore = lambda *args : (h_qmmm)
-
+        
+        # adds modifications for exact external charge embedding
+        if self.use_ext_charge_embedding:
+            h_ext = self.getChargeEmbeddingHamiltonian()
+            h_int = h_int + h_ext
+            h_qmmm = h_qmmm + h_ext
+            self.mf_int.get_hcore = lambda *args : (h_int)
+            self.mf_qmmm.get_hcore = lambda *args : (h_qmmm)
+            
         return
     
     def createModifiedResp(self):
@@ -527,7 +540,7 @@ class QMSystem:
         # get response energy
         if self.resp is not None:
             self.createModifiedResp()
-            self.resp_qmmm.kernel()
+            self.resp_qmmm.kernel(x0=self.xy_guess)
             E = [E]+[E_n+E for E_n in self.resp_qmmm.e]
         
         # do unit conversion as needed
@@ -1277,6 +1290,21 @@ class QMSystem:
                 
         return h_exchrep
     
+    def getChargeEmbeddingHamiltonian(self,mol=None):
+        '''
+        Generates the exactly charge embedding Hamiltonian, corresponds to potential from a sert of point charges
+        '''
+        if mol is None:
+            mol = self.mol 
+        
+        N_AO = mol.nao
+        h_emb = np.zeros((N_AO,N_AO))
+        R = self.ext_charge_positions
+        q = self.ext_charges
+        esp = mol.intor('int1e_grids',grids=R)
+        h_emb = -np.einsum('anm,a->nm',esp,q)
+        return h_emb
+    
     def getExchRepDerivMMHamilontian(self,B,mol=None):
         '''
         Generates the derivative of the exchange-repulsion Hamiltonian for a given MM atom A
@@ -1354,7 +1382,7 @@ class QMSystem:
         #F = - np.einsum('xnm,nm->x',grad_h_exchrep_B,dm)
         return  -np.einsum('xnm,nm->x',grad_h_exchrep_B,dm,optimize=self.dexchrep_einpath)
     
-    def getInteractionEnergyDecomposition(self,print_decomp=False,resp_state=None):
+    def getInteractionEnergyDecomposition(self,print_decomp=False,resp_state=None,use_rlxd_respdm=True):
         
         
         int_energies={}
@@ -1362,7 +1390,7 @@ class QMSystem:
         if self.int_method == "dreem":
             av_Q, av_QQ_1e, av_QQ_2e_c, av_QQ_2e_x = self.getMeanMultipoles(comb_coulexch=False)
             if resp_state is not None:
-                av_Q1, av_QQ_1e1, av_QQ_2e_c1, av_QQ_2e_x1 = self.getMeanMultipolesResp(comb_coulexch=False,relaxed=True)
+                av_Q1, av_QQ_1e1, av_QQ_2e_c1, av_QQ_2e_x1 = self.getMeanMultipolesResp(comb_coulexch=False,relaxed=use_rlxd_respdm)
                 av_Q += av_Q1
                 av_QQ_1e += av_QQ_1e1
                 av_QQ_2e_c += 2.0*av_QQ_2e_c1

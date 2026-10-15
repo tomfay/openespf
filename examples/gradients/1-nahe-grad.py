@@ -25,6 +25,8 @@ import matplotlib.pyplot as plt
 # set up the Pyscf QM system using HF/cc-pVDZ
 mol = gto.M(atom='Na 0 0 0',unit="Bohr",basis="cc-pVDZ",charge=1)
 mf = scf.RHF(mol)
+mf = dft.RKS(mol)
+mf.xc = 'CAM-B3LYP'
 
 # Get info MM He system and set up the OpenMM simulation object
 pdb = PDBFile("1-inputs/he.pdb")
